@@ -1,0 +1,44 @@
+name: flutter_yoga_pose
+version: 1.0.0+1
+description: Flutter 3D yoga simulator using three_js and MediaPipe Pose retargeting.
+publish_to: "none"
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management / utilities
+  flutter_hooks: ^0.20.5
+
+  # HTTP client for backend calls
+  http: ^1.1.0
+
+  # File picker for video uploads
+  file_picker: ^5.5.0
+
+  # Three.js rendering + loaders (modern versions)
+  three_js: ^0.2.6
+  three_js_advanced_loaders: ^0.2.4
+
+  # MediaPipe pose plugins (you can adjust or replace by platform)
+  # Android: flutter_mp_pose_landmarker (via git)
+  flutter_mp_pose_landmarker:
+    git:
+      url: https://github.com/mohammed893/flutter_pose_mediapipe
+
+  flutter_lints: ^6.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/Xbot.glb
+    - assets/models/Michelle.glb
+
+
