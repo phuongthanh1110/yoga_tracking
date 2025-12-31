@@ -38,6 +38,31 @@ class PoseLandmarkIndex {
   static const int rightFootIndex = 32;
 }
 
+/// Landmark indices (MediaPipe Hands).
+class HandLandmarkIndex {
+  static const int wrist = 0;
+  static const int thumbCMC = 1;
+  static const int thumbMCP = 2;
+  static const int thumbIP = 3;
+  static const int thumbTip = 4;
+  static const int indexMCP = 5;
+  static const int indexPIP = 6;
+  static const int indexDIP = 7;
+  static const int indexTip = 8;
+  static const int middleMCP = 9;
+  static const int middlePIP = 10;
+  static const int middleDIP = 11;
+  static const int middleTip = 12;
+  static const int ringMCP = 13;
+  static const int ringPIP = 14;
+  static const int ringDIP = 15;
+  static const int ringTip = 16;
+  static const int pinkyMCP = 17;
+  static const int pinkyPIP = 18;
+  static const int pinkyDIP = 19;
+  static const int pinkyTip = 20;
+}
+
 class MixamoPoint {
   MixamoPoint({required this.position, required this.visibility});
 
@@ -88,6 +113,11 @@ MixamoPoint? _getPoint(List<dynamic> landmarks, int index) {
   return MixamoPoint(position: _toVec3(lm), visibility: visibility);
 }
 
+MixamoPoint? _getHandPoint(List<dynamic> handLandmarks, int index) {
+  if (handLandmarks.isEmpty) return null;
+  return _getPoint(handLandmarks, index);
+}
+
 List<MixamoPoint> _createFingerChain(
   MixamoPoint? base,
   MixamoPoint? tip, {
@@ -110,11 +140,87 @@ List<MixamoPoint> _createFingerChain(
   return chain;
 }
 
+/// Adjusts Z-depth of hand landmarks based on palm aspect ratio.
+/// Inspired by SystemAnimatorOnline's hand Z correction algorithm.
+/// This helps when hands are viewed from the side (palm facing camera).
+void _adjustHandZDepth(List<dynamic> handLandmarks) {
+  if (handLandmarks.isEmpty || handLandmarks.length < 21) return;
+
+  // Palm landmarks: 0=wrist, 1=thumb_cmc, 5=index_mcp, 9=middle_mcp, 13=ring_mcp, 17=pinky_mcp
+  final wrist = handLandmarks[0];
+  final thumbCmc = handLandmarks[1];
+  final pinkyMcp = handLandmarks[17];
+  final middleMcp = handLandmarks[9];
+
+  // Calculate palm width (thumb to pinky) and height (wrist to middle)
+  final palmWidth = Vec3(
+    (thumbCmc.x - pinkyMcp.x).toDouble(),
+    (thumbCmc.y - pinkyMcp.y).toDouble(),
+    (thumbCmc.z - pinkyMcp.z).toDouble(),
+  );
+  final palmHeight = Vec3(
+    (wrist.x - middleMcp.x).toDouble(),
+    (wrist.y - middleMcp.y).toDouble(),
+    (wrist.z - middleMcp.z).toDouble(),
+  );
+
+  final wPalm = palmWidth.length;
+  final hPalm = palmHeight.length;
+  if (wPalm < 0.001 || hPalm < 0.001) return;
+
+  // Expected ratio is ~1.25-1.75 when palm faces camera
+  // If ratio is outside this range, Z-depth is likely incorrect
+  double aspectRatio = hPalm / wPalm;
+
+  // Clamp to reasonable range
+  if (aspectRatio < 1.25) {
+    aspectRatio = 1.25;
+  } else if (aspectRatio > 1.75) {
+    aspectRatio = 1.75;
+  } else {
+    return; // Already in good range, no adjustment needed
+  }
+
+  // Calculate Z adjustment factor based on aspect ratio deviation
+  final zAdjust = aspectRatio * aspectRatio;
+  final zScale = _calculateZScale(palmWidth, palmHeight, zAdjust);
+
+  if (zScale.abs() > 0.01 && zScale < 1.5) {
+    // Apply Z adjustment to all hand landmarks
+    for (final lm in handLandmarks) {
+      lm.z = (lm.z as num) * zScale;
+    }
+  }
+}
+
+double _calculateZScale(Vec3 palmWidth, Vec3 palmHeight, double targetRatio) {
+  // Solve for Z scale that makes aspect ratio match target
+  // palm_height^2 / target = palm_width^2
+  // (h_xy + h_z*s)^2 / target = (w_xy + w_z*s)^2
+  final hXy = palmHeight.x * palmHeight.x + palmHeight.y * palmHeight.y;
+  final wXy = palmWidth.x * palmWidth.x + palmWidth.y * palmWidth.y;
+  final hZ = palmHeight.z * palmHeight.z;
+  final wZ = palmWidth.z * palmWidth.z;
+
+  if ((wZ - hZ / targetRatio).abs() < 0.0001) return 1.0;
+
+  final s2 = ((hXy / targetRatio) - wXy) / (wZ - hZ / targetRatio);
+  if (s2 < 0) return 1.0;
+
+  return s2.clamp(0.5, 1.5);
+}
+
 /// Build Mixamo-like pose from MediaPipe world landmarks.
 MixamoPose buildMixamoPose({
   required List<dynamic> landmarksWorld,
+  List<dynamic> leftHandWorldLandmarks = const [],
+  List<dynamic> rightHandWorldLandmarks = const [],
 }) {
   if (landmarksWorld.isEmpty) return {};
+
+  // Apply Z-depth correction for hand landmarks (improves side-view accuracy)
+  _adjustHandZDepth(leftHandWorldLandmarks);
+  _adjustHandZDepth(rightHandWorldLandmarks);
 
   final leftHip = _getPoint(landmarksWorld, PoseLandmarkIndex.leftHip);
   final rightHip = _getPoint(landmarksWorld, PoseLandmarkIndex.rightHip);
@@ -150,6 +256,20 @@ MixamoPose buildMixamoPose({
   }
   if (rightEyeCenter != null) {
     mixamoPose['RightEye'] = _clonePoint(rightEyeCenter)!;
+  }
+
+  // Store ear landmarks for head yaw/roll calculation (critical for proper head orientation)
+  if (leftEar != null) {
+    mixamoPose['LeftEar'] = _clonePoint(leftEar)!;
+  }
+  if (rightEar != null) {
+    mixamoPose['RightEar'] = _clonePoint(rightEar)!;
+  }
+
+  // Store nose for head pitch calculation
+  final nose = _getPoint(landmarksWorld, PoseLandmarkIndex.nose);
+  if (nose != null) {
+    mixamoPose['Nose'] = _clonePoint(nose)!;
   }
 
   MixamoPoint? makeHeadTopEnd() {
@@ -195,47 +315,170 @@ MixamoPose buildMixamoPose({
     mixamoPose['RightForeArm'] = rightForeArm;
   }
 
-  if (leftWrist != null) mixamoPose['LeftHand'] = _clonePoint(leftWrist)!;
-  if (rightWrist != null) mixamoPose['RightHand'] = _clonePoint(rightWrist)!;
-
-  // Fingers
-  final leftThumbChain = _createFingerChain(leftWrist, leftThumb);
-  final leftIndexChain = _createFingerChain(leftWrist, leftIndex);
-  final leftPinkyChain = _createFingerChain(leftWrist, leftPinky);
-  final leftMiddleTip = _averagePoints([leftIndex, leftPinky]);
-  final leftRingTip = _averagePoints([leftIndex, leftPinky]);
-  final leftMiddleChain = _createFingerChain(leftWrist, leftMiddleTip);
-  final leftRingChain = _createFingerChain(leftWrist, leftRingTip);
-
-  void assignFinger(String prefix, List<MixamoPoint> chain) {
-    for (int i = 0; i < chain.length && i < 4; i++) {
-      final p = chain[i];
+  void assignFingerChain({
+    required String prefix,
+    required List<int> indices,
+    required List<dynamic> handLandmarks,
+    required MixamoPoint? wristFallback,
+    required MixamoPoint? tipFallback,
+  }) {
+    final points = indices
+        .map((i) => _getHandPoint(handLandmarks, i))
+        .toList(growable: false);
+    if (points.every((p) => p == null)) {
+      final chain = _createFingerChain(wristFallback, tipFallback);
+      for (int i = 0; i < chain.length && i < 4; i++) {
+        final p = chain[i];
+        mixamoPose['$prefix${i + 1}'] = MixamoPoint(
+          position: Vec3.clone(p.position),
+          visibility: p.visibility,
+        );
+      }
+      return;
+    }
+    for (int i = 0; i < points.length && i < 4; i++) {
+      final p = points[i];
+      if (p == null) continue;
       mixamoPose['$prefix${i + 1}'] = MixamoPoint(
-        position: Vec3.clone(p.position),
-        visibility: p.visibility,
-      );
+          position: Vec3.clone(p.position), visibility: p.visibility);
     }
   }
 
-  assignFinger('LeftHandThumb', leftThumbChain);
-  assignFinger('LeftHandIndex', leftIndexChain);
-  assignFinger('LeftHandMiddle', leftMiddleChain);
-  assignFinger('LeftHandRing', leftRingChain);
-  assignFinger('LeftHandPinky', leftPinkyChain);
+  // Hands and fingers with holistic data (fallback to pose wrist + tips).
+  final leftHandWrist =
+      _getHandPoint(leftHandWorldLandmarks, HandLandmarkIndex.wrist) ??
+          leftWrist;
+  final rightHandWrist =
+      _getHandPoint(rightHandWorldLandmarks, HandLandmarkIndex.wrist) ??
+          rightWrist;
 
-  final rightThumbChain = _createFingerChain(rightWrist, rightThumb);
-  final rightIndexChain = _createFingerChain(rightWrist, rightIndex);
-  final rightPinkyChain = _createFingerChain(rightWrist, rightPinky);
-  final rightMiddleTip = _averagePoints([rightIndex, rightPinky]);
-  final rightRingTip = _averagePoints([rightIndex, rightPinky]);
-  final rightMiddleChain = _createFingerChain(rightWrist, rightMiddleTip);
-  final rightRingChain = _createFingerChain(rightWrist, rightRingTip);
+  if (leftHandWrist != null)
+    mixamoPose['LeftHand'] = _clonePoint(leftHandWrist)!;
+  if (rightHandWrist != null) {
+    mixamoPose['RightHand'] = _clonePoint(rightHandWrist)!;
+  }
 
-  assignFinger('RightHandThumb', rightThumbChain);
-  assignFinger('RightHandIndex', rightIndexChain);
-  assignFinger('RightHandMiddle', rightMiddleChain);
-  assignFinger('RightHandRing', rightRingChain);
-  assignFinger('RightHandPinky', rightPinkyChain);
+  assignFingerChain(
+    prefix: 'LeftHandThumb',
+    indices: const [
+      HandLandmarkIndex.thumbCMC,
+      HandLandmarkIndex.thumbMCP,
+      HandLandmarkIndex.thumbIP,
+      HandLandmarkIndex.thumbTip,
+    ],
+    handLandmarks: leftHandWorldLandmarks,
+    wristFallback: leftWrist,
+    tipFallback: leftThumb,
+  );
+  assignFingerChain(
+    prefix: 'LeftHandIndex',
+    indices: const [
+      HandLandmarkIndex.indexMCP,
+      HandLandmarkIndex.indexPIP,
+      HandLandmarkIndex.indexDIP,
+      HandLandmarkIndex.indexTip,
+    ],
+    handLandmarks: leftHandWorldLandmarks,
+    wristFallback: leftWrist,
+    tipFallback: leftIndex,
+  );
+  assignFingerChain(
+    prefix: 'LeftHandMiddle',
+    indices: const [
+      HandLandmarkIndex.middleMCP,
+      HandLandmarkIndex.middlePIP,
+      HandLandmarkIndex.middleDIP,
+      HandLandmarkIndex.middleTip,
+    ],
+    handLandmarks: leftHandWorldLandmarks,
+    wristFallback: leftWrist,
+    tipFallback: _averagePoints([leftIndex, leftPinky]),
+  );
+  assignFingerChain(
+    prefix: 'LeftHandRing',
+    indices: const [
+      HandLandmarkIndex.ringMCP,
+      HandLandmarkIndex.ringPIP,
+      HandLandmarkIndex.ringDIP,
+      HandLandmarkIndex.ringTip,
+    ],
+    handLandmarks: leftHandWorldLandmarks,
+    wristFallback: leftWrist,
+    tipFallback: _averagePoints([leftIndex, leftPinky]),
+  );
+  assignFingerChain(
+    prefix: 'LeftHandPinky',
+    indices: const [
+      HandLandmarkIndex.pinkyMCP,
+      HandLandmarkIndex.pinkyPIP,
+      HandLandmarkIndex.pinkyDIP,
+      HandLandmarkIndex.pinkyTip,
+    ],
+    handLandmarks: leftHandWorldLandmarks,
+    wristFallback: leftWrist,
+    tipFallback: leftPinky,
+  );
+
+  assignFingerChain(
+    prefix: 'RightHandThumb',
+    indices: const [
+      HandLandmarkIndex.thumbCMC,
+      HandLandmarkIndex.thumbMCP,
+      HandLandmarkIndex.thumbIP,
+      HandLandmarkIndex.thumbTip,
+    ],
+    handLandmarks: rightHandWorldLandmarks,
+    wristFallback: rightWrist,
+    tipFallback: rightThumb,
+  );
+  assignFingerChain(
+    prefix: 'RightHandIndex',
+    indices: const [
+      HandLandmarkIndex.indexMCP,
+      HandLandmarkIndex.indexPIP,
+      HandLandmarkIndex.indexDIP,
+      HandLandmarkIndex.indexTip,
+    ],
+    handLandmarks: rightHandWorldLandmarks,
+    wristFallback: rightWrist,
+    tipFallback: rightIndex,
+  );
+  assignFingerChain(
+    prefix: 'RightHandMiddle',
+    indices: const [
+      HandLandmarkIndex.middleMCP,
+      HandLandmarkIndex.middlePIP,
+      HandLandmarkIndex.middleDIP,
+      HandLandmarkIndex.middleTip,
+    ],
+    handLandmarks: rightHandWorldLandmarks,
+    wristFallback: rightWrist,
+    tipFallback: _averagePoints([rightIndex, rightPinky]),
+  );
+  assignFingerChain(
+    prefix: 'RightHandRing',
+    indices: const [
+      HandLandmarkIndex.ringMCP,
+      HandLandmarkIndex.ringPIP,
+      HandLandmarkIndex.ringDIP,
+      HandLandmarkIndex.ringTip,
+    ],
+    handLandmarks: rightHandWorldLandmarks,
+    wristFallback: rightWrist,
+    tipFallback: _averagePoints([rightIndex, rightPinky]),
+  );
+  assignFingerChain(
+    prefix: 'RightHandPinky',
+    indices: const [
+      HandLandmarkIndex.pinkyMCP,
+      HandLandmarkIndex.pinkyPIP,
+      HandLandmarkIndex.pinkyDIP,
+      HandLandmarkIndex.pinkyTip,
+    ],
+    handLandmarks: rightHandWorldLandmarks,
+    wristFallback: rightWrist,
+    tipFallback: rightPinky,
+  );
 
   // Legs & feet
   final leftKnee = _getPoint(landmarksWorld, PoseLandmarkIndex.leftKnee);
@@ -289,19 +532,44 @@ MixamoPose buildMixamoPose({
 }
 
 /// Apply OneEuro filters to all pose points (world space smoothing).
+/// Uses adaptive beta based on body part type and visibility.
+/// Inspired by SystemAnimatorOnline's adaptive filtering approach.
 void smoothMixamoPose(
   MixamoPose pose,
   double t,
   Map<String, OneEuroFilterVector3> filters,
 ) {
+  // Beta values: higher = more responsive, lower = smoother
+  const armBeta = 0.08; // Arms need faster response
+  const handBeta = 0.1; // Hands need even faster response
+  const bodyBeta = 0.04; // Body/torso can be smoother
+  const legBeta = 0.05; // Legs moderate
+
+  double getBetaForKey(String key) {
+    if (key.contains('Hand') || key.contains('Finger')) return handBeta;
+    if (key.contains('Arm') || key.contains('ForeArm')) return armBeta;
+    if (key.contains('Leg') || key.contains('Foot') || key.contains('Toe')) {
+      return legBeta;
+    }
+    return bodyBeta;
+  }
+
   void smooth(String key) {
     final p = pose[key];
     if (p == null) return;
+
+    final beta = getBetaForKey(key);
+
     filters.putIfAbsent(
       key,
-      () => OneEuroFilterVector3(minCutoff: 0.01, beta: 0.1, dCutoff: 1.0),
+      () => OneEuroFilterVector3(minCutoff: 0.001, beta: beta, dCutoff: 1.0),
     );
     final f = filters[key]!;
+
+    // Adjust beta based on visibility (low visibility = smoother to avoid jitter)
+    final visibilityFactor = p.visibility.clamp(0.3, 1.0);
+    f.beta = beta * visibilityFactor;
+
     final smoothed = f.filter(t, p.position);
     p.position
       ..x = smoothed.x

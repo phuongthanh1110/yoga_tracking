@@ -34,12 +34,22 @@ class FramePose {
     required this.frameIndex,
     required this.landmarks,
     required this.landmarksWorld,
+    required this.leftHandLandmarks,
+    required this.rightHandLandmarks,
+    required this.leftHandWorldLandmarks,
+    required this.rightHandWorldLandmarks,
+    required this.faceLandmarks,
     this.segmentationMask,
   });
 
   final int frameIndex;
   final List<LandmarkPoint> landmarks;
   final List<LandmarkPoint> landmarksWorld;
+  final List<LandmarkPoint> leftHandLandmarks;
+  final List<LandmarkPoint> rightHandLandmarks;
+  final List<LandmarkPoint> leftHandWorldLandmarks;
+  final List<LandmarkPoint> rightHandWorldLandmarks;
+  final List<LandmarkPoint> faceLandmarks;
   final String? segmentationMask;
 
   factory FramePose.fromJson(Map<String, dynamic> json) {
@@ -60,6 +70,23 @@ class FramePose {
       frameIndex: json['frame_index'] as int,
       landmarks: img,
       landmarksWorld: world.isNotEmpty ? world : img,
+      leftHandLandmarks: pick('leftHandLandmarks', 'left_hand_landmarks')
+          .map((e) => LandmarkPoint.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      rightHandLandmarks: pick('rightHandLandmarks', 'right_hand_landmarks')
+          .map((e) => LandmarkPoint.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      leftHandWorldLandmarks:
+          pick('leftHandWorldLandmarks', 'left_hand_world_landmarks')
+              .map((e) => LandmarkPoint.fromJson(e as Map<String, dynamic>))
+              .toList(),
+      rightHandWorldLandmarks:
+          pick('rightHandWorldLandmarks', 'right_hand_world_landmarks')
+              .map((e) => LandmarkPoint.fromJson(e as Map<String, dynamic>))
+              .toList(),
+      faceLandmarks: pick('faceLandmarks', 'face_landmarks')
+          .map((e) => LandmarkPoint.fromJson(e as Map<String, dynamic>))
+          .toList(),
       segmentationMask: json['segmentationMask'] as String?,
     );
   }
@@ -74,6 +101,8 @@ class PoseExtractionResult {
     required this.height,
     this.metadata,
     this.landmarkIndices,
+    this.handLandmarkIndices,
+    this.faceLandmarkIndices,
   });
 
   final List<FramePose> frames;
@@ -83,6 +112,8 @@ class PoseExtractionResult {
   final int height;
   final Map<String, dynamic>? metadata;
   final Map<String, dynamic>? landmarkIndices;
+  final Map<String, dynamic>? handLandmarkIndices;
+  final Map<String, dynamic>? faceLandmarkIndices;
 
   factory PoseExtractionResult.fromJson(Map<String, dynamic> json) {
     final framesJson = json['frames'] as List? ?? const [];
@@ -97,6 +128,8 @@ class PoseExtractionResult {
       height: json['height'] as int? ?? 0,
       metadata: json['metadata'] as Map<String, dynamic>?,
       landmarkIndices: json['landmarkIndices'] as Map<String, dynamic>?,
+      handLandmarkIndices: json['handLandmarkIndices'] as Map<String, dynamic>?,
+      faceLandmarkIndices: json['faceLandmarkIndices'] as Map<String, dynamic>?,
     );
   }
 }

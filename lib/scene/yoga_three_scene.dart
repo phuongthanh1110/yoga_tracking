@@ -449,7 +449,11 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       debugPrint('[PosePlayback] Retargeter not ready.');
       return;
     }
-    final pose = mapping.buildMixamoPose(landmarksWorld: frame.landmarksWorld);
+    final pose = mapping.buildMixamoPose(
+      landmarksWorld: frame.landmarksWorld,
+      leftHandWorldLandmarks: frame.leftHandWorldLandmarks,
+      rightHandWorldLandmarks: frame.rightHandWorldLandmarks,
+    );
     if (pose.isEmpty) return;
     final t = _poseFrameIndex /
         (meta.fps > 0 ? meta.fps : 30.0); // timeline in seconds
@@ -499,7 +503,10 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     if (retargeter == null) return;
     if (frame.worldLandmarks.isEmpty) return;
 
-    final pose = mapping.buildMixamoPose(landmarksWorld: frame.worldLandmarks);
+    final pose = mapping.buildMixamoPose(
+      landmarksWorld: frame.worldLandmarks,
+      // Live source currently does not supply holistic hands; keep empty fallback.
+    );
     if (pose.isEmpty) return;
 
     final t = DateTime.now().millisecondsSinceEpoch / 1000.0;
@@ -861,5 +868,4 @@ const List<String> _canonicalBones = [
 ];
 
 /// Default backend base URL. Replace with your LAN IP / emulator loopback as needed.
-const String poseApiBaseUrl =
-    'https://hortense-apophyseal-untransparently.ngrok-free.dev';
+const String poseApiBaseUrl = 'http://127.0.0.1:8000';
