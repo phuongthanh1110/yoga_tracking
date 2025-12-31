@@ -35,14 +35,27 @@ class FramePose {
     required this.landmarks,
     required this.landmarksWorld,
     this.segmentationMask,
+    this.faceLandmarks,
+    this.leftHandLandmarks,
+    this.rightHandLandmarks,
   });
 
   final int frameIndex;
   final List<LandmarkPoint> landmarks;
   final List<LandmarkPoint> landmarksWorld;
   final String? segmentationMask;
+  final List<LandmarkPoint>? faceLandmarks;
+  final List<LandmarkPoint>? leftHandLandmarks;
+  final List<LandmarkPoint>? rightHandLandmarks;
 
   factory FramePose.fromJson(Map<String, dynamic> json) {
+    List<LandmarkPoint> parseLandmarks(List<dynamic>? data) {
+      if (data == null || data.isEmpty) return [];
+      return data
+          .map((e) => LandmarkPoint.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+
     List<dynamic> pick(String key, String alt) {
       if (json.containsKey(key)) return json[key] as List;
       if (json.containsKey(alt)) return json[alt] as List;
@@ -61,6 +74,9 @@ class FramePose {
       landmarks: img,
       landmarksWorld: world.isNotEmpty ? world : img,
       segmentationMask: json['segmentationMask'] as String?,
+      faceLandmarks: parseLandmarks(json['faceLandmarks'] as List?),
+      leftHandLandmarks: parseLandmarks(json['leftHandLandmarks'] as List?),
+      rightHandLandmarks: parseLandmarks(json['rightHandLandmarks'] as List?),
     );
   }
 }

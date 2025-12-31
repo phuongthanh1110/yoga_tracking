@@ -19,6 +19,7 @@ class YogaThreeSceneCommands extends InheritedWidget {
   final VoidCallback startWebcamPose;
   final VoidCallback togglePause;
   final void Function(File file) startVideoPose;
+  final void Function(double) updateModelScale;
 
   const YogaThreeSceneCommands({
     super.key,
@@ -27,6 +28,7 @@ class YogaThreeSceneCommands extends InheritedWidget {
     required this.startWebcamPose,
     required this.togglePause,
     required this.startVideoPose,
+    required this.updateModelScale,
   });
 
   static YogaThreeSceneCommands? of(BuildContext context) {
@@ -75,6 +77,9 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   final PoseApiClient _poseApi =
       PoseApiClient(baseUrl: poseApiBaseUrl); // adjust base URL as needed
 
+  // Model scale control
+  double _modelScale = 0.6;
+
   // Simple spherical-orbit camera controls (pan to rotate, pinch to zoom).
   double _radius = 4.0;
   double _theta = math.pi / 4; // yaw
@@ -122,7 +127,16 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         if (viewer == null) {
           return;
         }
-        viewer.scene = three.Scene()..background = three.Color(0xffffff);
+        // Set white background - use Color constructor with r, g, b values (0-1 range)
+        final whiteColor = three.Color(1.0, 1.0, 1.0);
+        viewer.scene = three.Scene()..background = whiteColor;
+
+        // Also set renderer clear color to white if available
+        try {
+          viewer.renderer?.setClearColor(whiteColor, 1.0);
+        } catch (e) {
+          // setClearColor might not be available, ignore
+        }
 
         viewer.camera = three.PerspectiveCamera(
           45,
@@ -132,7 +146,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         );
         _applyCameraOrbit();
 
-        final hemi = three.HemisphereLight(0xffffff, 0x444444)
+        final hemi = three.HemisphereLight(0x1F2933, 0xffffff)
           ..position.setValues(0, 20, 0);
         viewer.scene.add(hemi);
 
@@ -191,6 +205,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         });
         _logModelDiagnostics(result);
         _buildRetargeterFromModel(model);
+        _applyModelScale();
         final animations = result.animations ?? <three.AnimationClip>[];
         if (animations.isNotEmpty) {
           _mixer = three.AnimationMixer(model);
@@ -223,6 +238,20 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     _retargeter = null;
   }
 
+  void _applyModelScale() {
+    final model = _model;
+    if (model == null) return;
+    model.scale.setValues(_modelScale, _modelScale, _modelScale);
+    _threeJs?.render();
+  }
+
+  void updateModelScale(double scale) {
+    setState(() {
+      _modelScale = scale.clamp(0.1, 3.0);
+    });
+    _applyModelScale();
+  }
+
   @override
   Widget build(BuildContext context) {
     return YogaThreeSceneCommands(
@@ -236,6 +265,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       startVideoPose: (file) {
         _startVideoPose(file);
       },
+      updateModelScale: updateModelScale,
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -252,7 +282,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
               child: Align(
                 alignment: Alignment.topLeft,
                 child: Text(
-                  'Model loaded',
+                  'Loading...',
                   style: TextStyle(color: Colors.white70),
                 ),
               ),
@@ -326,7 +356,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
           ),
           if (widget.overlayBuilder != null)
             Align(
-              alignment: Alignment.bottomCenter,
+              alignment: Alignment.topCenter,
               child: Builder(
                 builder: (innerContext) => widget.overlayBuilder!(innerContext),
               ),
@@ -449,7 +479,29 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       debugPrint('[PosePlayback] Retargeter not ready.');
       return;
     }
-    final pose = mapping.buildMixamoPose(landmarksWorld: frame.landmarksWorld);
+    // Convert hand landmarks to List<Map> for buildMixamoPose
+    final leftHand = frame.leftHandLandmarks
+        ?.map((p) => <String, dynamic>{
+              'x': p.x,
+              'y': p.y,
+              'z': p.z,
+              'visibility': p.visibility ?? 1.0,
+            })
+        .toList();
+    final rightHand = frame.rightHandLandmarks
+        ?.map((p) => <String, dynamic>{
+              'x': p.x,
+              'y': p.y,
+              'z': p.z,
+              'visibility': p.visibility ?? 1.0,
+            })
+        .toList();
+
+    final pose = mapping.buildMixamoPose(
+      landmarksWorld: frame.landmarksWorld,
+      leftHandLandmarks: leftHand,
+      rightHandLandmarks: rightHand,
+    );
     if (pose.isEmpty) return;
     final t = _poseFrameIndex /
         (meta.fps > 0 ? meta.fps : 30.0); // timeline in seconds
@@ -861,5 +913,9 @@ const List<String> _canonicalBones = [
 ];
 
 /// Default backend base URL. Replace with your LAN IP / emulator loopback as needed.
+/// - iOS Simulator: use 'http://localhost:8000' or 'http://127.0.0.1:8000'
+/// - Android Emulator: use 'http://10.0.2.2:8000'
+/// - Real device on same network: use your machine's IP like 'http://192.168.1.65:8000'
+/// - Make sure backend is running with: uvicorn main:app --host 0.0.0.0 --port 8000
 const String poseApiBaseUrl =
-    'https://hortense-apophyseal-untransparently.ngrok-free.dev';
+    'http://localhost:8000'; // Change to your actual backend URL

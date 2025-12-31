@@ -29,7 +29,7 @@ dependencies:
     git:
       url: https://github.com/mohammed893/flutter_pose_mediapipe
 
-  flutter_lints: ^6.0.0
+  flutter_lints: ^5.0.0
 
 dev_dependencies:
   flutter_test:
@@ -40,5 +40,3 @@ flutter:
   assets:
     - assets/models/Xbot.glb
     - assets/models/Michelle.glb
-
-

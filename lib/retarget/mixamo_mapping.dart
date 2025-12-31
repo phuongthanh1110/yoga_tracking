@@ -38,6 +38,31 @@ class PoseLandmarkIndex {
   static const int rightFootIndex = 32;
 }
 
+/// Landmark indices (MediaPipe Hand - 21 points per hand).
+class HandLandmarkIndex {
+  static const int wrist = 0;
+  static const int thumbCmc = 1;
+  static const int thumbMcp = 2;
+  static const int thumbIp = 3;
+  static const int thumbTip = 4;
+  static const int indexFingerMcp = 5;
+  static const int indexFingerPip = 6;
+  static const int indexFingerDip = 7;
+  static const int indexFingerTip = 8;
+  static const int middleFingerMcp = 9;
+  static const int middleFingerPip = 10;
+  static const int middleFingerDip = 11;
+  static const int middleFingerTip = 12;
+  static const int ringFingerMcp = 13;
+  static const int ringFingerPip = 14;
+  static const int ringFingerDip = 15;
+  static const int ringFingerTip = 16;
+  static const int pinkyMcp = 17;
+  static const int pinkyPip = 18;
+  static const int pinkyDip = 19;
+  static const int pinkyTip = 20;
+}
+
 class MixamoPoint {
   MixamoPoint({required this.position, required this.visibility});
 
@@ -49,10 +74,56 @@ typedef MixamoPose = Map<String, MixamoPoint>;
 
 Vec3 _toVec3(dynamic landmark) {
   // MediaPipe poseWorldLandmarks: x,y,z, visibility?
+  // Handle both Map (from JSON) and object with properties
+  double getX(dynamic obj) {
+    if (obj is Map) {
+      try {
+        return (obj['x'] as num?)?.toDouble() ?? 0.0;
+      } catch (e) {
+        return 0.0;
+      }
+    }
+    try {
+      return (obj.x as num).toDouble();
+    } catch (e) {
+      return 0.0;
+    }
+  }
+
+  double getY(dynamic obj) {
+    if (obj is Map) {
+      try {
+        return (obj['y'] as num?)?.toDouble() ?? 0.0;
+      } catch (e) {
+        return 0.0;
+      }
+    }
+    try {
+      return (obj.y as num).toDouble();
+    } catch (e) {
+      return 0.0;
+    }
+  }
+
+  double getZ(dynamic obj) {
+    if (obj is Map) {
+      try {
+        return (obj['z'] as num?)?.toDouble() ?? 0.0;
+      } catch (e) {
+        return 0.0;
+      }
+    }
+    try {
+      return (obj.z as num).toDouble();
+    } catch (e) {
+      return 0.0;
+    }
+  }
+
   final v = Vec3(
-    (landmark.x as num).toDouble(),
-    (landmark.y as num).toDouble(),
-    (landmark.z as num).toDouble(),
+    getX(landmark),
+    getY(landmark),
+    getZ(landmark),
   );
   // Match JS axis adjustments
   v.y = -v.y;
@@ -83,8 +154,32 @@ MixamoPoint? _averagePoints(List<MixamoPoint?> points) {
 MixamoPoint? _getPoint(List<dynamic> landmarks, int index) {
   if (index < 0 || index >= landmarks.length) return null;
   final lm = landmarks[index];
-  final visibility =
-      (lm.visibility is num) ? (lm.visibility as num).toDouble() : 1.0;
+
+  // Handle both Map (from JSON) and object with properties
+  double getVisibility(dynamic obj) {
+    // Check if it's any kind of Map first - use [] operator, never use .visibility on Map
+    if (obj is Map) {
+      final vis = obj['visibility'];
+      if (vis != null && vis is num) {
+        return vis.toDouble();
+      }
+      return 1.0;
+    }
+    // For object types (like LandmarkPoint from pose landmarks)
+    // Use noSuchMethod to safely access property
+    try {
+      // Use dynamic invocation only if not a Map
+      final vis = (obj as dynamic).visibility;
+      if (vis != null && vis is num) {
+        return vis.toDouble();
+      }
+      return 1.0;
+    } catch (e) {
+      return 1.0;
+    }
+  }
+
+  final visibility = getVisibility(lm);
   return MixamoPoint(position: _toVec3(lm), visibility: visibility);
 }
 
@@ -111,8 +206,11 @@ List<MixamoPoint> _createFingerChain(
 }
 
 /// Build Mixamo-like pose from MediaPipe world landmarks.
+/// Optionally uses hand landmarks from MediaPipe Holistic for more accurate finger tracking.
 MixamoPose buildMixamoPose({
   required List<dynamic> landmarksWorld,
+  List<dynamic>? leftHandLandmarks,
+  List<dynamic>? rightHandLandmarks,
 }) {
   if (landmarksWorld.isEmpty) return {};
 
@@ -198,15 +296,7 @@ MixamoPose buildMixamoPose({
   if (leftWrist != null) mixamoPose['LeftHand'] = _clonePoint(leftWrist)!;
   if (rightWrist != null) mixamoPose['RightHand'] = _clonePoint(rightWrist)!;
 
-  // Fingers
-  final leftThumbChain = _createFingerChain(leftWrist, leftThumb);
-  final leftIndexChain = _createFingerChain(leftWrist, leftIndex);
-  final leftPinkyChain = _createFingerChain(leftWrist, leftPinky);
-  final leftMiddleTip = _averagePoints([leftIndex, leftPinky]);
-  final leftRingTip = _averagePoints([leftIndex, leftPinky]);
-  final leftMiddleChain = _createFingerChain(leftWrist, leftMiddleTip);
-  final leftRingChain = _createFingerChain(leftWrist, leftRingTip);
-
+  // Fingers - use hand landmarks if available, otherwise fallback to pose landmarks
   void assignFinger(String prefix, List<MixamoPoint> chain) {
     for (int i = 0; i < chain.length && i < 4; i++) {
       final p = chain[i];
@@ -217,25 +307,272 @@ MixamoPose buildMixamoPose({
     }
   }
 
-  assignFinger('LeftHandThumb', leftThumbChain);
-  assignFinger('LeftHandIndex', leftIndexChain);
-  assignFinger('LeftHandMiddle', leftMiddleChain);
-  assignFinger('LeftHandRing', leftRingChain);
-  assignFinger('LeftHandPinky', leftPinkyChain);
+  // Left hand fingers
+  if (leftHandLandmarks != null && leftHandLandmarks.isNotEmpty) {
+    // Use detailed hand landmarks from MediaPipe Holistic
+    final leftHandWrist = _getPoint(leftHandLandmarks, HandLandmarkIndex.wrist);
+    final leftHandThumbMcp =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.thumbMcp);
+    final leftHandThumbIp =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.thumbIp);
+    final leftHandThumbTip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.thumbTip);
+    final leftHandIndexMcp =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerMcp);
+    final leftHandIndexPip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerPip);
+    final leftHandIndexDip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerDip);
+    final leftHandIndexTip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerTip);
+    final leftHandMiddleMcp =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerMcp);
+    final leftHandMiddlePip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerPip);
+    final leftHandMiddleDip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerDip);
+    final leftHandMiddleTip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerTip);
+    final leftHandRingMcp =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerMcp);
+    final leftHandRingPip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerPip);
+    final leftHandRingDip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerDip);
+    final leftHandRingTip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerTip);
+    final leftHandPinkyMcp =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyMcp);
+    final leftHandPinkyPip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyPip);
+    final leftHandPinkyDip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyDip);
+    final leftHandPinkyTip =
+        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyTip);
 
-  final rightThumbChain = _createFingerChain(rightWrist, rightThumb);
-  final rightIndexChain = _createFingerChain(rightWrist, rightIndex);
-  final rightPinkyChain = _createFingerChain(rightWrist, rightPinky);
-  final rightMiddleTip = _averagePoints([rightIndex, rightPinky]);
-  final rightRingTip = _averagePoints([rightIndex, rightPinky]);
-  final rightMiddleChain = _createFingerChain(rightWrist, rightMiddleTip);
-  final rightRingChain = _createFingerChain(rightWrist, rightRingTip);
+    // Update wrist position from hand landmarks if available
+    if (leftHandWrist != null) {
+      mixamoPose['LeftHand'] = _clonePoint(leftHandWrist)!;
+    }
 
-  assignFinger('RightHandThumb', rightThumbChain);
-  assignFinger('RightHandIndex', rightIndexChain);
-  assignFinger('RightHandMiddle', rightMiddleChain);
-  assignFinger('RightHandRing', rightRingChain);
-  assignFinger('RightHandPinky', rightPinkyChain);
+    // Thumb: CMC -> MCP -> IP -> TIP (4 segments)
+    if (leftHandWrist != null &&
+        leftHandThumbMcp != null &&
+        leftHandThumbIp != null &&
+        leftHandThumbTip != null) {
+      final thumbChain = [
+        _clonePoint(leftHandThumbMcp)!,
+        _clonePoint(leftHandThumbIp)!,
+        _clonePoint(leftHandThumbTip)!,
+      ];
+      assignFinger('LeftHandThumb', thumbChain);
+    }
+
+    // Index finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (leftHandIndexMcp != null &&
+        leftHandIndexPip != null &&
+        leftHandIndexDip != null &&
+        leftHandIndexTip != null) {
+      final indexChain = [
+        _clonePoint(leftHandIndexMcp)!,
+        _clonePoint(leftHandIndexPip)!,
+        _clonePoint(leftHandIndexDip)!,
+        _clonePoint(leftHandIndexTip)!,
+      ];
+      assignFinger('LeftHandIndex', indexChain);
+    }
+
+    // Middle finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (leftHandMiddleMcp != null &&
+        leftHandMiddlePip != null &&
+        leftHandMiddleDip != null &&
+        leftHandMiddleTip != null) {
+      final middleChain = [
+        _clonePoint(leftHandMiddleMcp)!,
+        _clonePoint(leftHandMiddlePip)!,
+        _clonePoint(leftHandMiddleDip)!,
+        _clonePoint(leftHandMiddleTip)!,
+      ];
+      assignFinger('LeftHandMiddle', middleChain);
+    }
+
+    // Ring finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (leftHandRingMcp != null &&
+        leftHandRingPip != null &&
+        leftHandRingDip != null &&
+        leftHandRingTip != null) {
+      final ringChain = [
+        _clonePoint(leftHandRingMcp)!,
+        _clonePoint(leftHandRingPip)!,
+        _clonePoint(leftHandRingDip)!,
+        _clonePoint(leftHandRingTip)!,
+      ];
+      assignFinger('LeftHandRing', ringChain);
+    }
+
+    // Pinky finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (leftHandPinkyMcp != null &&
+        leftHandPinkyPip != null &&
+        leftHandPinkyDip != null &&
+        leftHandPinkyTip != null) {
+      final pinkyChain = [
+        _clonePoint(leftHandPinkyMcp)!,
+        _clonePoint(leftHandPinkyPip)!,
+        _clonePoint(leftHandPinkyDip)!,
+        _clonePoint(leftHandPinkyTip)!,
+      ];
+      assignFinger('LeftHandPinky', pinkyChain);
+    }
+  } else {
+    // Fallback to pose landmarks estimation
+    final leftThumbChain = _createFingerChain(leftWrist, leftThumb);
+    final leftIndexChain = _createFingerChain(leftWrist, leftIndex);
+    final leftPinkyChain = _createFingerChain(leftWrist, leftPinky);
+    final leftMiddleTip = _averagePoints([leftIndex, leftPinky]);
+    final leftRingTip = _averagePoints([leftIndex, leftPinky]);
+    final leftMiddleChain = _createFingerChain(leftWrist, leftMiddleTip);
+    final leftRingChain = _createFingerChain(leftWrist, leftRingTip);
+
+    assignFinger('LeftHandThumb', leftThumbChain);
+    assignFinger('LeftHandIndex', leftIndexChain);
+    assignFinger('LeftHandMiddle', leftMiddleChain);
+    assignFinger('LeftHandRing', leftRingChain);
+    assignFinger('LeftHandPinky', leftPinkyChain);
+  }
+
+  // Right hand fingers
+  if (rightHandLandmarks != null && rightHandLandmarks.isNotEmpty) {
+    // Use detailed hand landmarks from MediaPipe Holistic
+    final rightHandWrist =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.wrist);
+    final rightHandThumbMcp =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.thumbMcp);
+    final rightHandThumbIp =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.thumbIp);
+    final rightHandThumbTip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.thumbTip);
+    final rightHandIndexMcp =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerMcp);
+    final rightHandIndexPip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerPip);
+    final rightHandIndexDip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerDip);
+    final rightHandIndexTip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerTip);
+    final rightHandMiddleMcp =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerMcp);
+    final rightHandMiddlePip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerPip);
+    final rightHandMiddleDip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerDip);
+    final rightHandMiddleTip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerTip);
+    final rightHandRingMcp =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerMcp);
+    final rightHandRingPip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerPip);
+    final rightHandRingDip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerDip);
+    final rightHandRingTip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerTip);
+    final rightHandPinkyMcp =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyMcp);
+    final rightHandPinkyPip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyPip);
+    final rightHandPinkyDip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyDip);
+    final rightHandPinkyTip =
+        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyTip);
+
+    // Update wrist position from hand landmarks if available
+    if (rightHandWrist != null) {
+      mixamoPose['RightHand'] = _clonePoint(rightHandWrist)!;
+    }
+
+    // Thumb: CMC -> MCP -> IP -> TIP (4 segments)
+    if (rightHandWrist != null &&
+        rightHandThumbMcp != null &&
+        rightHandThumbIp != null &&
+        rightHandThumbTip != null) {
+      final thumbChain = [
+        _clonePoint(rightHandThumbMcp)!,
+        _clonePoint(rightHandThumbIp)!,
+        _clonePoint(rightHandThumbTip)!,
+      ];
+      assignFinger('RightHandThumb', thumbChain);
+    }
+
+    // Index finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (rightHandIndexMcp != null &&
+        rightHandIndexPip != null &&
+        rightHandIndexDip != null &&
+        rightHandIndexTip != null) {
+      final indexChain = [
+        _clonePoint(rightHandIndexMcp)!,
+        _clonePoint(rightHandIndexPip)!,
+        _clonePoint(rightHandIndexDip)!,
+        _clonePoint(rightHandIndexTip)!,
+      ];
+      assignFinger('RightHandIndex', indexChain);
+    }
+
+    // Middle finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (rightHandMiddleMcp != null &&
+        rightHandMiddlePip != null &&
+        rightHandMiddleDip != null &&
+        rightHandMiddleTip != null) {
+      final middleChain = [
+        _clonePoint(rightHandMiddleMcp)!,
+        _clonePoint(rightHandMiddlePip)!,
+        _clonePoint(rightHandMiddleDip)!,
+        _clonePoint(rightHandMiddleTip)!,
+      ];
+      assignFinger('RightHandMiddle', middleChain);
+    }
+
+    // Ring finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (rightHandRingMcp != null &&
+        rightHandRingPip != null &&
+        rightHandRingDip != null &&
+        rightHandRingTip != null) {
+      final ringChain = [
+        _clonePoint(rightHandRingMcp)!,
+        _clonePoint(rightHandRingPip)!,
+        _clonePoint(rightHandRingDip)!,
+        _clonePoint(rightHandRingTip)!,
+      ];
+      assignFinger('RightHandRing', ringChain);
+    }
+
+    // Pinky finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    if (rightHandPinkyMcp != null &&
+        rightHandPinkyPip != null &&
+        rightHandPinkyDip != null &&
+        rightHandPinkyTip != null) {
+      final pinkyChain = [
+        _clonePoint(rightHandPinkyMcp)!,
+        _clonePoint(rightHandPinkyPip)!,
+        _clonePoint(rightHandPinkyDip)!,
+        _clonePoint(rightHandPinkyTip)!,
+      ];
+      assignFinger('RightHandPinky', pinkyChain);
+    }
+  } else {
+    // Fallback to pose landmarks estimation
+    final rightThumbChain = _createFingerChain(rightWrist, rightThumb);
+    final rightIndexChain = _createFingerChain(rightWrist, rightIndex);
+    final rightPinkyChain = _createFingerChain(rightWrist, rightPinky);
+    final rightMiddleTip = _averagePoints([rightIndex, rightPinky]);
+    final rightRingTip = _averagePoints([rightIndex, rightPinky]);
+    final rightMiddleChain = _createFingerChain(rightWrist, rightMiddleTip);
+    final rightRingChain = _createFingerChain(rightWrist, rightRingTip);
+
+    assignFinger('RightHandThumb', rightThumbChain);
+    assignFinger('RightHandIndex', rightIndexChain);
+    assignFinger('RightHandMiddle', rightMiddleChain);
+    assignFinger('RightHandRing', rightRingChain);
+    assignFinger('RightHandPinky', rightPinkyChain);
+  }
 
   // Legs & feet
   final leftKnee = _getPoint(landmarksWorld, PoseLandmarkIndex.leftKnee);
