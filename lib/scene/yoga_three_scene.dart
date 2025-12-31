@@ -78,7 +78,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       PoseApiClient(baseUrl: poseApiBaseUrl); // adjust base URL as needed
 
   // Model scale control
-  double _modelScale = 0.6;
+  double _modelScale = 0.7;
 
   // Simple spherical-orbit camera controls (pan to rotate, pinch to zoom).
   double _radius = 4.0;

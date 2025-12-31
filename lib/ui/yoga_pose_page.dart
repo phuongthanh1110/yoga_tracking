@@ -30,7 +30,7 @@ class YogaPosePage extends StatelessWidget {
       top: true,
       bottom: false,
       child: Container(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(5),
         decoration: BoxDecoration(
           // color: Colors.white.withValues(alpha: 0.9),
           boxShadow: [
@@ -51,33 +51,19 @@ class YogaPosePage extends StatelessWidget {
               children: [
                 // Left column
                 Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       FilledButton(
                         onPressed: () {
                           YogaThreeSceneCommands.of(context)?.playDemo();
                         },
-                        child: const Icon(Icons.play_arrow, color: Colors.white),
+                        child: Image.asset(
+                          'assets/image/demo.png',
+                          width: 24,
+                          height: 24,
+                        ),
                       ),
-                      const SizedBox(height: 8),
-                      FilledButton.tonal(
-                        onPressed: () {
-                          YogaThreeSceneCommands.of(context)?.startWebcamPose();
-                        },
-                        child: const Text('Use Camera Pose'),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Right column
-                Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
                       FilledButton.tonal(
                         onPressed: () async {
                           final result = await FilePicker.platform.pickFiles(
@@ -89,21 +75,38 @@ class YogaPosePage extends StatelessWidget {
                                 ?.startVideoPose(File(path));
                           }
                         },
-                        child: const Text('Upload Video'),
+                        child: Image.asset(
+                          'assets/image/video.png',
+                          width: 24,
+                          height: 24,
+                        ),
                       ),
-                      const SizedBox(height: 8),
+                      FilledButton.tonal(
+                        onPressed: () {
+                          YogaThreeSceneCommands.of(context)?.startWebcamPose();
+                        },
+                        child: Image.asset(
+                          'assets/image/camera.png',
+                          width: 24,
+                          height: 24,
+                        ),
+                      ),
                       FilledButton.tonal(
                         onPressed: () {
                           YogaThreeSceneCommands.of(context)?.togglePause();
                         },
-                        child: const Text('Pause / Resume'),
+                        child: Image.asset(
+                          'assets/image/pause.png',
+                          width: 24,
+                          height: 24,
+                        ),
                       ),
                     ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 5),
             // Row 2 - Model Scale Slider
             _ModelScaleSlider(),
           ],
@@ -121,14 +124,14 @@ class _ModelScaleSlider extends StatefulWidget {
 }
 
 class _ModelScaleSliderState extends State<_ModelScaleSlider> {
-  double _scale = 0.60;
+  double _scale = 0.70;
 
   @override
   void initState() {
     super.initState();
     // Set initial scale when widget is created
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      YogaThreeSceneCommands.of(context)?.updateModelScale(0.6);
+      YogaThreeSceneCommands.of(context)?.updateModelScale(0.7);
     });
   }
 
