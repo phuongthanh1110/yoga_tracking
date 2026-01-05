@@ -149,6 +149,36 @@ class Quat {
     return this;
   }
 
+  /// Set quaternion from Euler angles (XYZ order, intrinsic rotations).
+  /// Angles are in radians.
+  Quat setFromEuler(double ex, double ey, double ez) {
+    final c1 = math.cos(ex / 2);
+    final c2 = math.cos(ey / 2);
+    final c3 = math.cos(ez / 2);
+    final s1 = math.sin(ex / 2);
+    final s2 = math.sin(ey / 2);
+    final s3 = math.sin(ez / 2);
+
+    // XYZ order
+    x = s1 * c2 * c3 + c1 * s2 * s3;
+    y = c1 * s2 * c3 - s1 * c2 * s3;
+    z = c1 * c2 * s3 + s1 * s2 * c3;
+    w = c1 * c2 * c3 - s1 * s2 * s3;
+
+    return this;
+  }
+
+  /// Create quaternion from axis-angle rotation.
+  Quat setFromAxisAngle(Vec3 axis, double angle) {
+    final halfAngle = angle / 2;
+    final s = math.sin(halfAngle);
+    x = axis.x * s;
+    y = axis.y * s;
+    z = axis.z * s;
+    w = math.cos(halfAngle);
+    return this;
+  }
+
   /// Slerp towards [target] by factor [t] (0..1).
   Quat slerp(Quat target, double t) {
     double cosHalfTheta =

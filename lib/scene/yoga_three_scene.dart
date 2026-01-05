@@ -9,6 +9,7 @@ import '../retarget/one_euro_filter.dart';
 import '../services/pose_api_client.dart';
 import '../retarget/mixamo_retargeter.dart';
 import '../pose/pose_source.dart';
+import '../ui/bone_controller.dart';
 import 'package:three_js/three_js.dart' as three;
 import 'package:three_js_advanced_loaders/three_js_advanced_loaders.dart';
 
@@ -75,6 +76,11 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   final PoseApiClient _poseApi =
       PoseApiClient(baseUrl: poseApiBaseUrl); // adjust base URL as needed
 
+  // Bone controller for UI integration
+  final BoneDataController _boneController = BoneDataController();
+  bool _showBoneController = false;
+  Timer? _boneMetricsTimer;
+
   // Simple spherical-orbit camera controls (pan to rotate, pinch to zoom).
   double _radius = 4.0;
   double _theta = math.pi / 4; // yaw
@@ -95,8 +101,10 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   @override
   void dispose() {
     _poseTimer?.cancel();
+    _boneMetricsTimer?.cancel();
     _livePoseSub?.cancel();
     _livePoseSource.stop();
+    _boneController.dispose();
     _threeJs?.dispose();
     super.dispose();
   }
@@ -156,9 +164,12 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
 
         // Render loop: update controls, mixer, then render.
         viewer.addAnimationEvent((dt) {
-          // three.AnimationMixer expects seconds; incoming dt appears ms on some platforms.
-          final deltaSec = dt > 5 ? dt / 1000.0 : dt;
-          _mixer?.update(deltaSec);
+          // Skip mixer updates when paused
+          if (!_boneController.isPaused) {
+            // three.AnimationMixer expects seconds; incoming dt appears ms on some platforms.
+            final deltaSec = dt > 5 ? dt / 1000.0 : dt;
+            _mixer?.update(deltaSec);
+          }
           viewer.render();
         });
 
@@ -230,9 +241,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       startWebcamPose: () {
         _startLivePose();
       },
-      togglePause: () {
-        debugPrint('Toggle pause (stub)');
-      },
+      togglePause: _togglePause,
       startVideoPose: (file) {
         _startVideoPose(file);
       },
@@ -331,9 +340,59 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
                 builder: (innerContext) => widget.overlayBuilder!(innerContext),
               ),
             ),
+          // Bone metrics overlay (top-left)
+          Positioned(
+            left: 12,
+            top: 12,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                BoneMetricsPanel(
+                  controller: _boneController,
+                  visibleBones: const [
+                    'Hips',
+                    'LeftHand',
+                    'RightHand',
+                    'Head',
+                    'LeftFoot',
+                    'RightFoot',
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // Toggle bone controller button
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.black87,
+                    foregroundColor: Colors.cyan,
+                  ),
+                  onPressed: () => setState(
+                      () => _showBoneController = !_showBoneController),
+                  icon: Icon(_showBoneController ? Icons.close : Icons.tune),
+                  label: Text(
+                      _showBoneController ? 'Hide Controls' : 'Bone Controls'),
+                ),
+              ],
+            ),
+          ),
+          // Full bone controller panel (right side)
+          if (_showBoneController)
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              child: BoneControllerPanel(
+                controller: _boneController,
+                onClose: () => setState(() => _showBoneController = false),
+              ),
+            ),
         ],
       ),
     );
+  }
+
+  void _togglePause() {
+    _boneController.togglePause();
+    debugPrint('[Pause] Simulation paused: ${_boneController.isPaused}');
   }
 
   void _applyCameraOrbit() {
@@ -444,6 +503,9 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   }
 
   void _applyPoseFrame(FramePose frame, PoseExtractionResult meta) {
+    // Skip pose application when paused
+    if (_boneController.isPaused) return;
+
     final retargeter = _retargeter;
     if (retargeter == null) {
       debugPrint('[PosePlayback] Retargeter not ready.');
@@ -499,6 +561,9 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   }
 
   void _applyLivePoseFrame(PoseFrame frame) {
+    // Skip pose application when paused
+    if (_boneController.isPaused) return;
+
     final retargeter = _retargeter;
     if (retargeter == null) return;
     if (frame.worldLandmarks.isEmpty) return;
@@ -680,11 +745,25 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     }
     if (resolved.isNotEmpty) {
       _retargeter = MixamoRetargeter(modelRoot: model, bones: resolved);
+
+      // Initialize bone controller with resolved bones
+      _boneController.setBones(resolved);
+      _startBoneMetricsUpdater();
+
       debugPrint(
           '[Retarget] Built retargeter with ${resolved.length}/${_canonicalBones.length} bones');
     } else {
       debugPrint('[Retarget] Failed to build retargeter (no bones resolved)');
     }
+  }
+
+  /// Start a timer to periodically update bone metrics from current rotations.
+  void _startBoneMetricsUpdater() {
+    _boneMetricsTimer?.cancel();
+    _boneMetricsTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      if (!mounted) return;
+      _boneController.updateFromBones();
+    });
   }
 
   Map<String, dynamic> _collectBones(three.Object3D root) {

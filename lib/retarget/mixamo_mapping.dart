@@ -113,9 +113,26 @@ MixamoPoint? _getPoint(List<dynamic> landmarks, int index) {
   return MixamoPoint(position: _toVec3(lm), visibility: visibility);
 }
 
+/// Convert hand landmark to Vec3.
+/// Applies same Y/Z axis flip as pose landmarks for consistency.
 MixamoPoint? _getHandPoint(List<dynamic> handLandmarks, int index) {
-  if (handLandmarks.isEmpty) return null;
-  return _getPoint(handLandmarks, index);
+  if (handLandmarks.isEmpty || index < 0 || index >= handLandmarks.length) {
+    return null;
+  }
+  final lm = handLandmarks[index];
+  final visibility =
+      (lm.visibility is num) ? (lm.visibility as num).toDouble() : 1.0;
+
+  final v = Vec3(
+    (lm.x as num).toDouble(),
+    (lm.y as num).toDouble(),
+    (lm.z as num).toDouble(),
+  );
+  // Apply same axis adjustments as pose landmarks
+  v.y = -v.y;
+  v.z = -v.z;
+
+  return MixamoPoint(position: v, visibility: visibility);
 }
 
 List<MixamoPoint> _createFingerChain(
@@ -345,6 +362,7 @@ MixamoPose buildMixamoPose({
   }
 
   // Hands and fingers with holistic data (fallback to pose wrist + tips).
+  // Palm orientation is handled in retargeter via different cross product order per hand side
   final leftHandWrist =
       _getHandPoint(leftHandWorldLandmarks, HandLandmarkIndex.wrist) ??
           leftWrist;
@@ -419,6 +437,8 @@ MixamoPose buildMixamoPose({
     tipFallback: leftPinky,
   );
 
+  // Right hand finger chains
+  // Palm orientation is handled in retargeter via different cross product order
   assignFingerChain(
     prefix: 'RightHandThumb',
     indices: const [

@@ -216,6 +216,7 @@ class MixamoRetargeter {
       forearm: 'LeftForeArm',
       index: 'LeftHandIndex1',
       pinky: 'LeftHandPinky1',
+      isRightHand: false,
     );
     _handleHand(
       pose,
@@ -223,6 +224,7 @@ class MixamoRetargeter {
       forearm: 'RightForeArm',
       index: 'RightHandIndex1',
       pinky: 'RightHandPinky1',
+      isRightHand: true,
     );
 
     // Handle head with proper orientation (not just direction)
@@ -637,12 +639,14 @@ class MixamoRetargeter {
 
   /// Handles palm twist and wrist bend using index/pinky to build a palm basis.
   /// This now properly calculates wrist bend angle for poses like hands on ground.
+  /// [isRightHand] determines palm normal direction (cross product order differs per side).
   void _handleHand(
     MixamoPose pose, {
     required String hand,
     required String forearm,
     required String index,
     required String pinky,
+    required bool isRightHand,
   }) {
     final handBone = bones[hand];
     final pHand = pose[hand];
@@ -684,9 +688,19 @@ class MixamoRetargeter {
       ..normalize();
 
     // Palm normal from cross product
-    var targetZ = Vec3()
-      ..setFromCross(targetFingerDir, targetPinkyDir)
-      ..normalize();
+    // KalidoKit approach: swap cross product order based on hand side
+    // LEFT hand:  cross(indexDir, pinkyDir) → palm normal pointing outward (toward palm face)
+    // RIGHT hand: cross(pinkyDir, indexDir) → palm normal pointing outward (toward palm face)
+    var targetZ = Vec3();
+    if (isRightHand) {
+      targetZ
+        ..setFromCross(targetPinkyDir, targetFingerDir)
+        ..normalize();
+    } else {
+      targetZ
+        ..setFromCross(targetFingerDir, targetPinkyDir)
+        ..normalize();
+    }
     if (targetZ.lengthSq < 1e-6) {
       // Fallback: use forearm direction to compute palm normal
       final forearmDir = Vec3.clone(pHand.position)
@@ -698,12 +712,27 @@ class MixamoRetargeter {
     }
     if (targetZ.lengthSq < 1e-6) return;
 
+    // === FLOOR CONSTRAINT HEURISTIC ===
+    // When doing floor exercises (plank, push-ups), MediaPipe sometimes
+    // flips the palm orientation. We detect this and correct it.
+    // If hand is low (< 25cm from ground) AND palm normal points UP (Y > 0.4),
+    // the hand is likely on the floor pushing down - flip the palm normal.
+    final handHeight = pHand.position.y; // In MediaPipe coords, Y is vertical
+    final palmPointsUp = targetZ.y > 0.4;
+    final elbowAboveWrist = pForeArm.position.y > pHand.position.y;
+
+    if (handHeight < 25.0 && palmPointsUp && elbowAboveWrist) {
+      // We're in a floor press position but palm is facing sky - flip it
+      targetZ.scale(-1);
+    }
+
     final targetX = Vec3()
       ..setFromCross(targetY, targetZ)
       ..normalize();
     final targetBasis = _quatFromBasis(targetX, targetY, targetZ);
 
     // Build bind pose hand basis
+    // Use same cross product order as target for consistency
     final bindFingerDir = Vec3.clone(bindIndex.position)
       ..sub(bindHand.position)
       ..normalize();
@@ -716,9 +745,17 @@ class MixamoRetargeter {
       ..scale(0.5)
       ..normalize();
 
-    var bindZ = Vec3()
-      ..setFromCross(bindFingerDir, bindPinkyDir)
-      ..normalize();
+    // Same cross product order as target (per hand side)
+    var bindZ = Vec3();
+    if (isRightHand) {
+      bindZ
+        ..setFromCross(bindPinkyDir, bindFingerDir)
+        ..normalize();
+    } else {
+      bindZ
+        ..setFromCross(bindFingerDir, bindPinkyDir)
+        ..normalize();
+    }
     if (bindZ.lengthSq < 1e-6) {
       final bindForearmDir = Vec3.clone(bindHand.position)
         ..sub(bindForeArm.position)
@@ -739,6 +776,165 @@ class MixamoRetargeter {
 
     // High interpolation weight for responsive wrist movement
     _applyWorldRotationToBone(handBone, targetWorld, 0.9);
+
+    // Apply finger curl and spread based on joint angles (KalidoKit approach)
+    _handleFingers(pose, side: isRightHand ? 'Right' : 'Left');
+  }
+
+  /// Calculates and applies finger curl/spread based on inter-joint angles.
+  /// Uses KalidoKit's approach: the angle between 3 consecutive points
+  /// determines how much that joint should bend.
+  void _handleFingers(MixamoPose pose, {required String side}) {
+    final invert = side == 'Right' ? 1.0 : -1.0;
+    final handPose = pose['${side}Hand'];
+    if (handPose == null) return;
+
+    // Process each finger
+    final fingers = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'];
+
+    // Get middle finger direction for spread reference
+    final middleMcp = pose['${side}HandMiddle1'];
+
+    for (final fingerName in fingers) {
+      final mcp = pose['${side}Hand${fingerName}1'];
+      final pip = pose['${side}Hand${fingerName}2'];
+      final dip = pose['${side}Hand${fingerName}3'];
+      final tip = pose['${side}Hand${fingerName}4'];
+
+      if (mcp == null || pip == null || dip == null || tip == null) continue;
+
+      // Calculate curl angles at each joint
+      // MCP curl: angle at MCP between wrist→MCP and MCP→PIP
+      final mcpCurl =
+          _calculateJointAngle(handPose.position, mcp.position, pip.position);
+
+      // PIP curl: angle at PIP between MCP→PIP and PIP→DIP
+      final pipCurl =
+          _calculateJointAngle(mcp.position, pip.position, dip.position);
+
+      // DIP curl: angle at DIP between PIP→DIP and DIP→Tip
+      final dipCurl =
+          _calculateJointAngle(pip.position, dip.position, tip.position);
+
+      // Calculate finger spread (abduction) at MCP
+      double spread = 0.0;
+      if (middleMcp != null && fingerName != 'Middle') {
+        spread = _calculateFingerSpread(
+            handPose.position, mcp.position, middleMcp.position, fingerName);
+      }
+
+      // Apply rotations to each joint
+      _applyFingerJointRotation('${side}Hand${fingerName}1', mcpCurl, spread,
+          fingerName, 'MCP', invert);
+      _applyFingerJointRotation(
+          '${side}Hand${fingerName}2', pipCurl, 0.0, fingerName, 'PIP', invert);
+      _applyFingerJointRotation(
+          '${side}Hand${fingerName}3', dipCurl, 0.0, fingerName, 'DIP', invert);
+    }
+  }
+
+  /// Calculates the bend angle at joint B, given points A→B→C.
+  /// Returns angle in radians, where 0 = straight, π = fully bent.
+  double _calculateJointAngle(Vec3 a, Vec3 b, Vec3 c) {
+    // Vector from B to A (incoming)
+    final v1 = Vec3.clone(a)..sub(b);
+    // Vector from B to C (outgoing)
+    final v2 = Vec3.clone(c)..sub(b);
+
+    if (v1.lengthSq < 1e-10 || v2.lengthSq < 1e-10) return 0.0;
+    v1.normalize();
+    v2.normalize();
+
+    // Dot product gives cos(angle)
+    final dot = v1.dot(v2).clamp(-1.0, 1.0);
+    final angle = math.acos(dot);
+
+    // Convert: 180° (straight) = 0 curl, 0° (fully bent) = max curl
+    // Return how much the joint is bent from straight
+    return math.pi - angle;
+  }
+
+  /// Calculates how much a finger spreads away from the middle finger.
+  double _calculateFingerSpread(
+      Vec3 wrist, Vec3 fingerMcp, Vec3 middleMcp, String fingerName) {
+    // Direction from wrist to middle MCP (reference)
+    final middleDir = Vec3.clone(middleMcp)..sub(wrist);
+    if (middleDir.lengthSq < 1e-10) return 0.0;
+    middleDir.normalize();
+
+    // Direction from wrist to this finger's MCP
+    final fingerDir = Vec3.clone(fingerMcp)..sub(wrist);
+    if (fingerDir.lengthSq < 1e-10) return 0.0;
+    fingerDir.normalize();
+
+    // Angle between directions
+    final dot = middleDir.dot(fingerDir).clamp(-1.0, 1.0);
+    var angle = math.acos(dot);
+
+    // Sign based on which side of middle finger
+    // Index/Thumb spread one way, Ring/Pinky spread other way
+    if (fingerName == 'Ring' || fingerName == 'Pinky') {
+      angle = -angle;
+    }
+
+    return angle.clamp(-0.5, 0.5); // Limit spread range
+  }
+
+  /// Applies curl and spread rotation to a finger joint bone.
+  void _applyFingerJointRotation(
+    String boneName,
+    double curlAngle,
+    double spreadAngle,
+    String fingerName,
+    String jointType,
+    double invert,
+  ) {
+    final bone = bones[boneName];
+    final bind = _bindPose[boneName];
+    if (bone == null || bind == null) return;
+
+    // Scale curl based on joint type and finger
+    double scaledCurl;
+    double scaledSpread = spreadAngle * 0.3; // Spread is subtle
+
+    if (fingerName == 'Thumb') {
+      // Thumb has unique rotation axes
+      final dampener = jointType == 'MCP' ? 0.6 : 0.5;
+      scaledCurl = curlAngle * dampener;
+      scaledCurl = scaledCurl.clamp(-0.8, 1.2);
+      scaledSpread = spreadAngle * 0.5 * invert;
+    } else {
+      // Regular fingers: curl along local Z axis
+      scaledCurl = curlAngle * 0.9;
+
+      // Clamp to human limits (fingers bend ~90° at each joint)
+      scaledCurl = scaledCurl.clamp(0.0, math.pi * 0.55);
+
+      // Apply invert for correct direction
+      scaledCurl *= invert;
+      scaledSpread *= invert;
+    }
+
+    // Start from bind pose
+    final bindLocal = bind.localQuaternion;
+
+    // Create rotation: curl is primary (Z-axis), spread is secondary (Y-axis)
+    Quat combinedRot;
+    if (fingerName == 'Thumb') {
+      // Thumb rotates differently (more complex axes)
+      combinedRot = Quat()
+        ..setFromEuler(scaledCurl * 0.5, scaledSpread, scaledCurl);
+    } else {
+      // Regular fingers: Z-curl, Y-spread
+      combinedRot = Quat()..setFromEuler(0, scaledSpread, scaledCurl);
+    }
+
+    // Combine with bind pose
+    final newLocal = Quat.clone(bindLocal)..multiply(combinedRot);
+
+    // Apply with high weight for responsive fingers
+    _slerpBoneQuat(bone, newLocal, 0.85);
+    _updateBoneMatrix(bone);
   }
 
   /// Adds swivel (pole vector) so elbows/knees point correctly.
@@ -884,6 +1080,9 @@ class MixamoRetargeter {
   }
 
   void _alignBone(String parentName, String childName, MixamoPose pose) {
+    // Skip finger bones - handled by _handleFingers with angle-based curl
+    if (_isFingerBone(parentName)) return;
+
     final parentBone = bones[parentName];
     final parentPose = pose[parentName];
     final childPose = pose[childName];
@@ -910,6 +1109,15 @@ class MixamoRetargeter {
   }
 
   // --- Helpers ---
+
+  /// Returns true if the bone name is a finger joint bone.
+  bool _isFingerBone(String boneName) {
+    return boneName.contains('HandThumb') ||
+        boneName.contains('HandIndex') ||
+        boneName.contains('HandMiddle') ||
+        boneName.contains('HandRing') ||
+        boneName.contains('HandPinky');
+  }
 
   void _applyWorldRotationToBone(dynamic bone, Quat targetWorld, double t) {
     Quat newLocal = targetWorld;
