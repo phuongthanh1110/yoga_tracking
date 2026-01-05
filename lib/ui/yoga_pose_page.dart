@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 
 import '../scene/yoga_three_scene.dart';
+import '../utils/device_info.dart';
 
 /// High–level screen widget (UI layer).
 /// - Single Responsibility: only builds UI and passes callbacks/flags to the scene.
@@ -26,13 +27,14 @@ class YogaPosePage extends StatelessWidget {
   }
 
   Widget _buildControls(BuildContext context) {
+    final isMobile = DeviceInfo.isMobile(context);
+
     return SafeArea(
       top: true,
       bottom: false,
       child: Container(
-        padding: const EdgeInsets.all(5),
+        padding: EdgeInsets.all(isMobile ? 8 : 12),
         decoration: BoxDecoration(
-          // color: Colors.white.withValues(alpha: 0.9),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.1),
@@ -45,79 +47,115 @@ class YogaPosePage extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Row 1 - Action buttons (2 columns)
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Left column
-                Expanded(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      FilledButton(
-                        onPressed: () {
-                          YogaThreeSceneCommands.of(context)?.playDemo();
-                        },
-                        child: Image.asset(
-                          'assets/image/demo.png',
-                          width: 24,
-                          height: 24,
-                        ),
-                      ),
-                      FilledButton.tonal(
-                        onPressed: () async {
-                          final result = await FilePicker.platform.pickFiles(
-                            type: FileType.video,
-                          );
-                          final path = result?.files.single.path;
-                          if (path != null) {
-                            YogaThreeSceneCommands.of(context)
-                                ?.startVideoPose(File(path));
-                          }
-                        },
-                        child: Image.asset(
-                          'assets/image/video.png',
-                          width: 24,
-                          height: 24,
-                        ),
-                      ),
-                      FilledButton.tonal(
-                        onPressed: () {
-                          YogaThreeSceneCommands.of(context)?.startWebcamPose();
-                        },
-                        child: Image.asset(
-                          'assets/image/camera.png',
-                          width: 24,
-                          height: 24,
-                        ),
-                      ),
-                      FilledButton.tonal(
-                        onPressed: () {
-                          YogaThreeSceneCommands.of(context)?.togglePause();
-                        },
-                        child: Image.asset(
-                          'assets/image/pause.png',
-                          width: 24,
-                          height: 24,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 5),
-            // Row 2 - Model Scale Slider
-            _ModelScaleSlider(),
+            // Adaptive button layout
+            _buildButtonRow(context, isMobile: isMobile),
+            SizedBox(height: isMobile ? 8 : 12),
+            // Model Scale Slider
+            _ModelScaleSlider(isMobile: isMobile),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildButtonRow(BuildContext context, {required bool isMobile}) {
+    final buttonSize = isMobile ? 44.0 : 48.0; // Minimum 44px for touch targets
+    final iconSize = isMobile ? 20.0 : 24.0;
+
+    // Mobile: Wrap buttons if needed, Tablet/Desktop: Single row
+    if (isMobile) {
+      return Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        alignment: WrapAlignment.center,
+        children: _buildControlButtons(context,
+            buttonSize: buttonSize, iconSize: iconSize),
+      );
+    } else {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: _buildControlButtons(context,
+            buttonSize: buttonSize, iconSize: iconSize),
+      );
+    }
+  }
+
+  List<Widget> _buildControlButtons(
+    BuildContext context, {
+    required double buttonSize,
+    required double iconSize,
+  }) {
+    return [
+      _buildControlButton(
+        context,
+        icon: Image.asset('assets/image/demo.png',
+            width: iconSize, height: iconSize),
+        onPressed: () => YogaThreeSceneCommands.of(context)?.playDemo(),
+        buttonSize: buttonSize,
+      ),
+      _buildControlButton(
+        context,
+        icon: Image.asset('assets/image/video.png',
+            width: iconSize, height: iconSize),
+        onPressed: () async {
+          final result =
+              await FilePicker.platform.pickFiles(type: FileType.video);
+          final path = result?.files.single.path;
+          if (path != null) {
+            YogaThreeSceneCommands.of(context)?.startVideoPose(File(path));
+          }
+        },
+        buttonSize: buttonSize,
+      ),
+      _buildControlButton(
+        context,
+        icon: Image.asset('assets/image/camera.png',
+            width: iconSize, height: iconSize),
+        onPressed: () => YogaThreeSceneCommands.of(context)?.startWebcamPose(),
+        buttonSize: buttonSize,
+      ),
+      _buildControlButton(
+        context,
+        icon: Image.asset('assets/image/pause.png',
+            width: iconSize, height: iconSize),
+        onPressed: () => YogaThreeSceneCommands.of(context)?.togglePause(),
+        buttonSize: buttonSize,
+      ),
+      _buildControlButton(
+        context,
+        icon: Icon(Icons.download, size: iconSize),
+        onPressed: () => YogaThreeSceneCommands.of(context)?.downloadPoseJson(),
+        buttonSize: buttonSize,
+      ),
+    ];
+  }
+
+  Widget _buildControlButton(
+    BuildContext context, {
+    required Widget icon,
+    required VoidCallback onPressed,
+    required double buttonSize,
+  }) {
+    return SizedBox(
+      width: buttonSize,
+      height: buttonSize,
+      child: FilledButton(
+        onPressed: onPressed,
+        style: FilledButton.styleFrom(
+          padding: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
+        child: icon,
       ),
     );
   }
 }
 
 class _ModelScaleSlider extends StatefulWidget {
-  const _ModelScaleSlider();
+  final bool isMobile;
+  const _ModelScaleSlider({required this.isMobile});
 
   @override
   State<_ModelScaleSlider> createState() => _ModelScaleSliderState();
@@ -137,8 +175,15 @@ class _ModelScaleSliderState extends State<_ModelScaleSlider> {
 
   @override
   Widget build(BuildContext context) {
+    // Adaptive slider width: 80% screen width on mobile, fixed 300px on tablet/desktop
+    final sliderWidth =
+        widget.isMobile ? DeviceInfo.screenWidth(context) * 0.8 : 300.0;
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: EdgeInsets.symmetric(
+        horizontal: widget.isMobile ? 16 : 24,
+        vertical: widget.isMobile ? 8 : 12,
+      ),
       decoration: BoxDecoration(
         color: const Color.fromARGB(0, 255, 255, 255),
         borderRadius: BorderRadius.circular(8),
@@ -146,23 +191,17 @@ class _ModelScaleSliderState extends State<_ModelScaleSlider> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // const Icon(Icons.aspect_ratio, color: Colors.white70, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                'Model Size: ${_scale.toStringAsFixed(2)}x',
-                style: const TextStyle(
-                    color: Colors.black,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold),
-              ),
-            ],
+          Text(
+            'Model Size: ${_scale.toStringAsFixed(2)}x',
+            style: TextStyle(
+              color: Colors.black,
+              fontSize: widget.isMobile ? 14 : 16,
+              fontWeight: FontWeight.bold,
+            ),
           ),
           const SizedBox(height: 8),
           SizedBox(
-            width: 200,
+            width: sliderWidth,
             child: Slider(
               value: _scale,
               min: 0.1,

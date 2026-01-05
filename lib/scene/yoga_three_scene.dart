@@ -1,9 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../retarget/mixamo_mapping.dart' as mapping;
 import '../retarget/one_euro_filter.dart';
 import '../services/pose_api_client.dart';
@@ -20,6 +24,8 @@ class YogaThreeSceneCommands extends InheritedWidget {
   final VoidCallback togglePause;
   final void Function(File file) startVideoPose;
   final void Function(double) updateModelScale;
+  final void Function(double) updatePlaybackSpeed;
+  final VoidCallback downloadPoseJson;
 
   const YogaThreeSceneCommands({
     super.key,
@@ -29,6 +35,8 @@ class YogaThreeSceneCommands extends InheritedWidget {
     required this.togglePause,
     required this.startVideoPose,
     required this.updateModelScale,
+    required this.updatePlaybackSpeed,
+    required this.downloadPoseJson,
   });
 
   static YogaThreeSceneCommands? of(BuildContext context) {
@@ -71,19 +79,30 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   List<FramePose> _poseFrames = const [];
   int _poseFrameIndex = 0;
   bool _isPosePlaying = false;
+  PoseExtractionResult?
+      _lastPoseResult; // Store last pose extraction result for download
   final PoseSource _livePoseSource = createDefaultPoseSource();
   StreamSubscription<PoseFrame>? _livePoseSub;
   Widget? _livePreview;
   final PoseApiClient _poseApi =
       PoseApiClient(baseUrl: poseApiBaseUrl); // adjust base URL as needed
 
+  // SSE Progress tracking - Use ValueNotifier for reliable UI updates
+  final ValueNotifier<double?> _processingProgressNotifier =
+      ValueNotifier<double?>(null);
+
   // Model scale control
   double _modelScale = 0.7;
 
+  // Playback speed multiplier (1.0 = normal, 2.0 = 2x speed, 0.5 = half speed)
+  double _playbackSpeedMultiplier = 1.0;
+
   // Simple spherical-orbit camera controls (pan to rotate, pinch to zoom).
   double _radius = 4.0;
-  double _theta = math.pi / 4; // yaw
-  double _phi = math.pi / 2.2; // pitch
+  double _theta = 0.0; // yaw: 0 = front view (chính diện)
+  double _phi = 2 *
+      math.pi /
+      3; // pitch: 120° = looking up from below (hướng từ dưới lên)
   double _startRadius = 4.0;
 
   @override
@@ -103,6 +122,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     _livePoseSub?.cancel();
     _livePoseSource.stop();
     _threeJs?.dispose();
+    _processingProgressNotifier.dispose();
     super.dispose();
   }
 
@@ -206,6 +226,10 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         _logModelDiagnostics(result);
         _buildRetargeterFromModel(model);
         _applyModelScale();
+        // Reset camera to front view when model loads
+        _theta = 0.0; // Front view (chính diện)
+        _phi = 1.75 * math.pi / 4; // Looking up from below (hướng từ dưới lên)
+        _applyCameraOrbit();
         final animations = result.animations ?? <three.AnimationClip>[];
         if (animations.isNotEmpty) {
           _mixer = three.AnimationMixer(model);
@@ -252,6 +276,75 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     _applyModelScale();
   }
 
+  void updatePlaybackSpeed(double multiplier) {
+    setState(() {
+      _playbackSpeedMultiplier = multiplier.clamp(0.1, 4.0);
+    });
+    // Restart playback with new speed if currently playing
+    if (_isPosePlaying && _poseFrames.isNotEmpty && _lastPoseResult != null) {
+      _cancelPosePlayback();
+      _poseFrameIndex = 0;
+      final fps = _lastPoseResult!.fps > 0 ? _lastPoseResult!.fps : 30.0;
+      final effectiveFps = fps * _playbackSpeedMultiplier;
+      final stepMs = math.max(8, (1000 / effectiveFps).round());
+      _isPosePlaying = true;
+      _poseTimer = Timer.periodic(Duration(milliseconds: stepMs), (timer) {
+        if (!_isPosePlaying) {
+          timer.cancel();
+          return;
+        }
+        if (_poseFrameIndex >= _poseFrames.length) {
+          debugPrint('[PosePlayback] Completed video playback.');
+          timer.cancel();
+          _isPosePlaying = false;
+          return;
+        }
+        final frame = _poseFrames[_poseFrameIndex];
+        _poseFrameIndex++;
+        _applyPoseFrame(frame, _lastPoseResult!);
+      });
+    }
+  }
+
+  Future<void> downloadPoseJson() async {
+    if (_lastPoseResult == null) {
+      debugPrint('[Download] No pose data to download');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No pose data available to download')),
+      );
+      return;
+    }
+
+    try {
+      // Convert PoseExtractionResult to JSON Map
+      final jsonMap = _lastPoseResult!.toJson();
+      // final jsonString = const JsonEncoder.withIndent('  ').convert(jsonMap);
+      // Option 6B: Compact JSON (no indent) to reduce file size
+      final jsonString = const JsonEncoder().convert(jsonMap);
+
+      // Get temporary directory
+      final directory = await getTemporaryDirectory();
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final file = File('${directory.path}/pose_export_$timestamp.json');
+
+      // Write JSON to file
+      await file.writeAsString(jsonString);
+
+      // Share/download the file
+      final xFile = XFile(file.path);
+      await Share.shareXFiles([xFile], text: 'Pose extraction result');
+
+      debugPrint('[Download] JSON file saved: ${file.path}');
+    } catch (e) {
+      debugPrint('[Download] Error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Download failed: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return YogaThreeSceneCommands(
@@ -266,102 +359,142 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         _startVideoPose(file);
       },
       updateModelScale: updateModelScale,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (_threeJs != null) _threeJs!.build() else const SizedBox.shrink(),
-          // Gesture layer to capture drag/pinch atop the texture.
-          if (_threeJs != null)
-            Positioned.fill(
-              child: _withGestures(Container(color: Colors.transparent)),
-            ),
-          Offstage(
-            offstage: !_isLoaded,
-            child: const Padding(
-              padding: EdgeInsets.all(12),
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: Text(
-                  'Loading...',
-                  style: TextStyle(color: Colors.white70),
+      updatePlaybackSpeed: updatePlaybackSpeed,
+      downloadPoseJson: downloadPoseJson,
+      child: ValueListenableBuilder<double?>(
+        valueListenable: _processingProgressNotifier,
+        builder: (context, progress, _) {
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              if (_threeJs != null)
+                _threeJs!.build()
+              else
+                const SizedBox.shrink(),
+              // Gesture layer to capture drag/pinch atop the texture.
+              if (_threeJs != null)
+                Positioned.fill(
+                  child: _withGestures(Container(color: Colors.transparent)),
+                ),
+              Offstage(
+                offstage: !_isLoaded,
+                child: const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    child: Text(
+                      'Loading...',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          if (_isLoading)
-            const Center(
-              child: CircularProgressIndicator(),
-            ),
-          if (_error != null && !_isLoading)
-            Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.error, color: Colors.red),
-                  const SizedBox(height: 8),
-                  Text(
-                    _error!,
-                    style: const TextStyle(color: Colors.redAccent),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          if (_livePreview != null)
-            Positioned(
-              left: 12,
-              bottom: 12 + (widget.overlayBuilder != null ? 90 : 0),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  width: 160,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    color: Colors.black,
-                    border: Border.all(color: Colors.white24),
-                  ),
-                  child: _livePreview,
+              if (_isLoading)
+                const Center(
+                  child: CircularProgressIndicator(),
                 ),
-              ),
-            ),
-          Positioned(
-            right: 12,
-            bottom: 12,
-            child: Card(
-              color: Colors.black54,
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: _modelAssets.keys.map((key) {
-                    final isSelected = _selectedModel == key;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: ChoiceChip(
-                        label: Text(key),
-                        selected: isSelected,
-                        onSelected: (val) {
-                          if (val && key != _selectedModel) {
-                            setState(() => _selectedModel = key);
-                            _loadModelAsset(key);
-                          }
-                        },
+              if (_error != null && !_isLoading)
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.error, color: Colors.red),
+                      const SizedBox(height: 8),
+                      Text(
+                        _error!,
+                        style: const TextStyle(color: Colors.redAccent),
+                        textAlign: TextAlign.center,
                       ),
-                    );
-                  }).toList(),
+                    ],
+                  ),
+                ),
+              if (_livePreview != null)
+                Positioned(
+                  left: 12,
+                  bottom: 12 + (widget.overlayBuilder != null ? 90 : 0),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      width: 160,
+                      height: 120,
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: _livePreview,
+                    ),
+                  ),
+                ),
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: Card(
+                  color: Colors.black54,
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: _modelAssets.keys.map((key) {
+                        final isSelected = _selectedModel == key;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: ChoiceChip(
+                            label: Text(key),
+                            selected: isSelected,
+                            onSelected: (val) {
+                              if (val && key != _selectedModel) {
+                                setState(() => _selectedModel = key);
+                                _loadModelAsset(key);
+                              }
+                            },
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          if (widget.overlayBuilder != null)
-            Align(
-              alignment: Alignment.topCenter,
-              child: Builder(
-                builder: (innerContext) => widget.overlayBuilder!(innerContext),
-              ),
-            ),
-        ],
+              // Progress indicator - Must be LAST in Stack to be on top
+              if (progress != null)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black.withOpacity(0.5),
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.8),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'Processing...',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (widget.overlayBuilder != null)
+                Align(
+                  alignment: Alignment.topCenter,
+                  child: Builder(
+                    builder: (innerContext) =>
+                        widget.overlayBuilder!(innerContext),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -438,20 +571,44 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     _isPosePlaying = true;
     _mixer?.stopAllAction();
     debugPrint('[PosePlayback] Uploading video for pose extraction...');
+
+    // Reset progress
+    _processingProgressNotifier.value = 0.0;
+
     try {
-      final result =
-          await _poseApi.uploadVideoForPose(videoFile: videoFile, stride: 1);
+      // Use SSE endpoint với progress updates
+      final result = await _poseApi.uploadVideoForPoseWithProgress(
+        videoFile: videoFile,
+        stride: 1,
+        onProgress: (progress) {
+          debugPrint(
+              '[PosePlayback] Processing progress callback: ${progress.toStringAsFixed(1)}%');
+          // Use ValueNotifier - works from any thread/context
+          _processingProgressNotifier.value = progress;
+        },
+      );
+
+      // Reset progress when complete
+      _processingProgressNotifier.value = null;
+
       if (result.frames.isEmpty) {
         debugPrint('[PosePlayback] No frames returned from backend.');
         _isPosePlaying = false;
         return;
       }
+      // Store result for download
+      setState(() {
+        _lastPoseResult = result;
+      });
       _poseFrames = result.frames;
       _poseFrameIndex = 0;
       final fps = result.fps > 0 ? result.fps : 30.0;
-      final stepMs = math.max(16, (1000 / fps).round());
+      // Apply playback speed multiplier: higher multiplier = faster playback = lower stepMs
+      final effectiveFps = fps * _playbackSpeedMultiplier;
+      final stepMs =
+          math.max(8, (1000 / effectiveFps).round()); // Min 8ms for 120fps max
       debugPrint(
-          '[PosePlayback] Playing ${_poseFrames.length} frames at ~$fps fps (step ${stepMs}ms)');
+          '[PosePlayback] Playing ${_poseFrames.length} frames at ~$fps fps (effective ~${effectiveFps.toStringAsFixed(1)} fps, step ${stepMs}ms)');
       _poseTimer = Timer.periodic(Duration(milliseconds: stepMs), (timer) {
         if (!_isPosePlaying) {
           timer.cancel();
@@ -469,7 +626,15 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       });
     } catch (e) {
       debugPrint('[PosePlayback] Error: $e');
-      _isPosePlaying = false;
+      _processingProgressNotifier.value = null;
+      setState(() {
+        _isPosePlaying = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Video processing failed: $e')),
+        );
+      }
     }
   }
 
@@ -714,6 +879,16 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
 
   void _buildRetargeterFromModel(three.Object3D model) {
     final boneMap = _collectBones(model);
+
+    // Log all bones found in the model
+    debugPrint('[Retarget] ===== BONES IN MODEL =====');
+    debugPrint('[Retarget] Total bones found: ${boneMap.length}');
+    final boneNames = boneMap.keys.toList()..sort();
+    for (final name in boneNames) {
+      debugPrint('[Retarget]   - $name');
+    }
+    debugPrint('[Retarget] =========================');
+
     final resolved = <String, dynamic>{};
     for (final canonical in _canonicalBones) {
       final bone = _resolveBone(boneMap, _nameVariants(canonical));
@@ -743,6 +918,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   }
 
   dynamic _resolveBone(Map<String, dynamic> boneMap, List<String> candidates) {
+    // Try exact match first
     for (final candidate in candidates) {
       final direct = boneMap[candidate];
       if (direct != null) return direct;
@@ -755,7 +931,112 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
           .value;
       if (hit != null) return hit;
     }
+
+    // Try fuzzy matching if no exact match found
+    for (final candidate in candidates) {
+      final fuzzyMatch = _fuzzyMatchBone(boneMap, candidate);
+      if (fuzzyMatch != null) {
+        debugPrint(
+            '[Retarget] Fuzzy match: "$candidate" → "${fuzzyMatch.key}"');
+        return fuzzyMatch.value;
+      }
+    }
+
     return null;
+  }
+
+  /// Fuzzy matching: Find bone with similar name using keyword matching
+  MapEntry<String, dynamic>? _fuzzyMatchBone(
+      Map<String, dynamic> boneMap, String canonical) {
+    // Normalize: remove common prefixes and convert to lowercase
+    final normalized = canonical
+        .toLowerCase()
+        .replaceAll('mixamorig', '')
+        .replaceAll('_', '')
+        .replaceAll('-', '')
+        .replaceAll(' ', '');
+
+    // Extract keywords from canonical name
+    final keywords = _extractKeywords(normalized);
+    if (keywords.isEmpty) return null;
+
+    MapEntry<String, dynamic>? bestMatch;
+    double bestScore = 0.5; // Minimum similarity threshold
+
+    for (final entry in boneMap.entries) {
+      final boneName = entry.key
+          .toLowerCase()
+          .replaceAll('mixamorig', '')
+          .replaceAll('_', '')
+          .replaceAll('-', '')
+          .replaceAll(' ', '');
+
+      // Check if bone name contains all keywords
+      bool containsAllKeywords = true;
+      int matchedKeywords = 0;
+      for (final keyword in keywords) {
+        if (boneName.contains(keyword)) {
+          matchedKeywords++;
+        } else {
+          containsAllKeywords = false;
+        }
+      }
+
+      if (containsAllKeywords && matchedKeywords > 0) {
+        // Calculate similarity score
+        final score = matchedKeywords / keywords.length;
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = entry;
+        }
+      }
+    }
+
+    return bestMatch;
+  }
+
+  /// Extract keywords from bone name (e.g., "leftarm" -> ["left", "arm"])
+  List<String> _extractKeywords(String name) {
+    final keywords = <String>[];
+
+    // Common bone parts
+    final parts = [
+      'hip',
+      'hips',
+      'pelvis',
+      'spine',
+      'spine1',
+      'spine2',
+      'chest',
+      'neck',
+      'head',
+      'shoulder',
+      'arm',
+      'forearm',
+      'hand',
+      'thumb',
+      'index',
+      'middle',
+      'ring',
+      'pinky',
+      'leg',
+      'upleg',
+      'knee',
+      'foot',
+      'toe',
+      'eye',
+      'left',
+      'right',
+    ];
+
+    // Find matching parts in name
+    for (final part in parts) {
+      if (name.contains(part)) {
+        keywords.add(part);
+      }
+    }
+
+    return keywords;
   }
 
   List<String> _nameVariants(String canonical) => [
@@ -770,6 +1051,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
 const Map<String, String> _modelAssets = {
   'Xbot': 'assets/models/Xbot.glb',
   'Michelle': 'assets/models/Michelle.glb',
+  'hiphop': 'assets/models/hiphop.glb',
 };
 
 const List<String> _mixamoBoneNames = [

@@ -137,6 +137,143 @@ MixamoPoint? _clonePoint(MixamoPoint? p) {
       position: Vec3.clone(p.position), visibility: p.visibility);
 }
 
+/// Calculate palm normal vector from poseWorldLandmarks (stable 3D coordinates)
+/// and disambiguate using elbow direction.
+/// Returns true if palm normal should be flipped (palm facing away), false otherwise.
+///
+/// Strategy:
+/// 1. Use poseWorldLandmarks (wrist, index, pinky) for palm orientation - stable 3D coordinates
+/// 2. Calculate palm normal from cross product: (wrist → index) × (index → pinky)
+/// 3. Disambiguate using elbow direction: if palm normal points toward elbow, flip it
+///
+/// Note: handLandmarks are normalized 2D-ish with unstable z, so we use poseWorldLandmarks
+/// for orientation. handLandmarks should only be used for finger flexion, not palm orientation.
+bool _shouldFlipPalmNormal(
+  MixamoPoint? poseWrist,
+  MixamoPoint? poseIndex,
+  MixamoPoint? posePinky,
+  MixamoPoint? poseElbow,
+) {
+  if (poseWrist == null ||
+      poseIndex == null ||
+      posePinky == null ||
+      poseElbow == null) {
+    return false; // Default: no flip
+  }
+
+  // Use poseWorldLandmarks (stable 3D world coordinates) for palm orientation
+  // vAcross: ngang lòng bàn tay (index → pinky)
+  final vAcross = Vec3.clone(posePinky.position)..sub(poseIndex.position);
+  if (vAcross.lengthSq < 1e-6) return false;
+
+  // vForward: dọc bàn tay (wrist → index)
+  final vForward = Vec3.clone(poseIndex.position)..sub(poseWrist.position);
+  if (vForward.lengthSq < 1e-6) return false;
+
+  // Palm normal: cross(vAcross, vForward)
+  // Using poseWorldLandmarks ensures stable 3D coordinates (no unstable z from normalized handLandmarks)
+  final palmNormal = Vec3.clone(vAcross)..cross(vForward);
+  if (palmNormal.lengthSq < 1e-6) return false; // Vectors are parallel
+  palmNormal.normalize();
+
+  // Elbow direction: elbow → wrist (in world coordinates, already axis-adjusted)
+  final elbowDirection = Vec3.clone(poseWrist.position)
+    ..sub(poseElbow.position);
+  if (elbowDirection.lengthSq < 1e-6) return false;
+  elbowDirection.normalize();
+
+  // Disambiguate: if palm normal points toward elbow (positive dot product),
+  // it means palm is facing toward elbow, so we need to flip Z axis
+  final dotProduct = palmNormal.dot(elbowDirection);
+  // If dot product > 0: palm normal points in same direction as elbow direction
+  // (palm facing toward elbow) → need to flip Z axis
+  // If dot product < 0: palm normal points away from elbow → no flip needed
+  return dotProduct > 0.0;
+}
+
+/// Convert hand landmark from normalized image coordinates to world coordinates.
+/// Hand landmarks are in normalized image space (0-1 range), need to be converted
+/// to world coordinates by aligning with pose wrist and scaling relative distances.
+///
+/// Strategy: Calculate relative offsets from hand wrist, scale based on pose landmarks,
+/// then apply to poseWorld wrist position.
+/// Uses shouldFlipPalmZ parameter (calculated from poseWorldLandmarks) to adjust Z axis.
+MixamoPoint? _convertHandLandmarkToWorld(
+  dynamic handLandmark,
+  dynamic handWristLandmark, // Hand wrist (index 0) for reference
+  MixamoPoint? poseWrist, // Pose world wrist position (anchor point)
+  MixamoPoint? poseElbow, // Pose world elbow (for scale calculation)
+  bool
+      shouldFlipPalmZ, // Whether to flip Z axis (from palm orientation detection)
+) {
+  if (poseWrist == null || handWristLandmark == null) return null;
+
+  double getValue(dynamic obj, String key) {
+    if (obj is Map) {
+      return (obj[key] as num?)?.toDouble() ?? 0.0;
+    }
+    try {
+      return (obj as dynamic)[key] as double;
+    } catch (_) {
+      return 0.0;
+    }
+  }
+
+  // Get normalized coordinates
+  final handX = getValue(handLandmark, 'x');
+  final handY = getValue(handLandmark, 'y');
+  final handZ = getValue(handLandmark, 'z');
+  final wristX = getValue(handWristLandmark, 'x');
+  final wristY = getValue(handWristLandmark, 'y');
+  final wristZ = getValue(handWristLandmark, 'z');
+
+  // Calculate relative offsets in normalized space
+  final offsetX = handX - wristX;
+  final offsetY = handY - wristY;
+  final offsetZ = handZ - wristZ;
+
+  // Calculate scale factor from pose landmarks (elbow to wrist distance)
+  // Typical hand span in normalized space is ~0.05-0.15
+  // Typical elbow-wrist distance in world space is ~0.25-0.35m
+  double scaleFactor = 0.25; // Default scale: 0.25m per normalized unit
+  if (poseElbow != null) {
+    final elbowWristDist = poseWrist.position.distanceTo(poseElbow.position);
+    // Hand span is roughly 1/3 to 1/2 of forearm length
+    // Normalized hand span is ~0.1, so scale = (elbow-wrist dist) / 0.1 * hand_ratio
+    final handToForearmRatio = 0.4; // Hand span is ~40% of forearm length
+    final normalizedHandSpan = 0.1; // Typical normalized hand span
+    scaleFactor = (elbowWristDist / normalizedHandSpan) * handToForearmRatio;
+    // Clamp to reasonable range
+    scaleFactor = scaleFactor.clamp(0.1, 1.0);
+  }
+
+  // Convert normalized offsets to world offsets
+  final worldOffsetX = offsetX * scaleFactor;
+  final worldOffsetY = offsetY * scaleFactor;
+  final worldOffsetZ = offsetZ * scaleFactor;
+
+  // Apply axis adjustments (match _toVec3() for pose landmarks)
+  // MediaPipe coordinates need to be adjusted: y=-y, z=-z
+  final adjustedOffsetY = -worldOffsetY;
+  var adjustedOffsetZ = -worldOffsetZ;
+
+  // Apply palm orientation flip (calculated from poseWorldLandmarks, passed as parameter)
+  // If palm normal points toward elbow, flip Z axis to correct orientation
+  if (shouldFlipPalmZ) {
+    adjustedOffsetZ =
+        -adjustedOffsetZ; // Double flip = back to original direction
+  }
+
+  // Apply to pose wrist position (which is already axis-adjusted)
+  final worldPos = Vec3(
+    poseWrist.position.x + worldOffsetX,
+    poseWrist.position.y + adjustedOffsetY,
+    poseWrist.position.z + adjustedOffsetZ,
+  );
+
+  return MixamoPoint(position: worldPos, visibility: 1.0);
+}
+
 MixamoPoint? _averagePoints(List<MixamoPoint?> points) {
   final filtered = points.where((p) => p != null).cast<MixamoPoint>().toList();
   if (filtered.isEmpty) return null;
@@ -297,8 +434,9 @@ MixamoPose buildMixamoPose({
   if (rightWrist != null) mixamoPose['RightHand'] = _clonePoint(rightWrist)!;
 
   // Fingers - use hand landmarks if available, otherwise fallback to pose landmarks
-  void assignFinger(String prefix, List<MixamoPoint> chain) {
-    for (int i = 0; i < chain.length && i < 4; i++) {
+  void assignFinger(String prefix, List<MixamoPoint> chain,
+      {int maxSegments = 4}) {
+    for (int i = 0; i < chain.length && i < maxSegments; i++) {
       final p = chain[i];
       mixamoPose['$prefix${i + 1}'] = MixamoPoint(
         position: Vec3.clone(p.position),
@@ -307,57 +445,45 @@ MixamoPose buildMixamoPose({
     }
   }
 
-  // Left hand fingers
-  if (leftHandLandmarks != null && leftHandLandmarks.isNotEmpty) {
+  // Left hand fingers - Full animation restored
+  if (leftHandLandmarks != null &&
+      leftHandLandmarks.isNotEmpty &&
+      leftWrist != null) {
     // Use detailed hand landmarks from MediaPipe Holistic
-    final leftHandWrist = _getPoint(leftHandLandmarks, HandLandmarkIndex.wrist);
-    final leftHandThumbMcp =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.thumbMcp);
-    final leftHandThumbIp =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.thumbIp);
-    final leftHandThumbTip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.thumbTip);
-    final leftHandIndexMcp =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerMcp);
-    final leftHandIndexPip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerPip);
-    final leftHandIndexDip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerDip);
-    final leftHandIndexTip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.indexFingerTip);
-    final leftHandMiddleMcp =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerMcp);
-    final leftHandMiddlePip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerPip);
-    final leftHandMiddleDip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerDip);
-    final leftHandMiddleTip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.middleFingerTip);
-    final leftHandRingMcp =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerMcp);
-    final leftHandRingPip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerPip);
-    final leftHandRingDip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerDip);
-    final leftHandRingTip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.ringFingerTip);
-    final leftHandPinkyMcp =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyMcp);
-    final leftHandPinkyPip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyPip);
-    final leftHandPinkyDip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyDip);
-    final leftHandPinkyTip =
-        _getPoint(leftHandLandmarks, HandLandmarkIndex.pinkyTip);
+    // Convert from normalized image coordinates to world coordinates
+    final leftHandWristRaw = leftHandLandmarks[HandLandmarkIndex.wrist];
+    final leftElbow = _getPoint(landmarksWorld, PoseLandmarkIndex.leftElbow);
 
-    // Update wrist position from hand landmarks if available
-    if (leftHandWrist != null) {
-      mixamoPose['LeftHand'] = _clonePoint(leftHandWrist)!;
+    // Wrist position: Always use poseWorld wrist (world coordinates)
+    // Hand landmarks are only used for finger rotations/positions relative to wrist
+    // This avoids coordinate system mismatch (hand landmarks are normalized, poseWorld is world coords)
+    mixamoPose['LeftHand'] = _clonePoint(leftWrist)!;
+
+    // Calculate palm orientation using poseWorldLandmarks (stable 3D coordinates)
+    // Use poseWorldLandmarks for palm orientation, not handLandmarks (unstable z)
+    final leftIndex = _getPoint(landmarksWorld, PoseLandmarkIndex.leftIndex);
+    final leftPinky = _getPoint(landmarksWorld, PoseLandmarkIndex.leftPinky);
+    final shouldFlipLeftPalmZ =
+        _shouldFlipPalmNormal(leftWrist, leftIndex, leftPinky, leftElbow);
+
+    // Convert hand landmarks from normalized coordinates to world coordinates
+    // Helper function to convert hand landmark to world space
+    MixamoPoint? convertHand(int index) {
+      if (index < 0 || index >= leftHandLandmarks.length) return null;
+      return _convertHandLandmarkToWorld(
+        leftHandLandmarks[index],
+        leftHandWristRaw,
+        leftWrist,
+        leftElbow,
+        shouldFlipLeftPalmZ,
+      );
     }
 
-    // Thumb: CMC -> MCP -> IP -> TIP (4 segments)
-    if (leftHandWrist != null &&
-        leftHandThumbMcp != null &&
+    // Thumb: MCP -> IP -> TIP (3 segments)
+    final leftHandThumbMcp = convertHand(HandLandmarkIndex.thumbMcp);
+    final leftHandThumbIp = convertHand(HandLandmarkIndex.thumbIp);
+    final leftHandThumbTip = convertHand(HandLandmarkIndex.thumbTip);
+    if (leftHandThumbMcp != null &&
         leftHandThumbIp != null &&
         leftHandThumbTip != null) {
       final thumbChain = [
@@ -369,6 +495,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Index finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final leftHandIndexMcp = convertHand(HandLandmarkIndex.indexFingerMcp);
+    final leftHandIndexPip = convertHand(HandLandmarkIndex.indexFingerPip);
+    final leftHandIndexDip = convertHand(HandLandmarkIndex.indexFingerDip);
+    final leftHandIndexTip = convertHand(HandLandmarkIndex.indexFingerTip);
     if (leftHandIndexMcp != null &&
         leftHandIndexPip != null &&
         leftHandIndexDip != null &&
@@ -383,6 +513,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Middle finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final leftHandMiddleMcp = convertHand(HandLandmarkIndex.middleFingerMcp);
+    final leftHandMiddlePip = convertHand(HandLandmarkIndex.middleFingerPip);
+    final leftHandMiddleDip = convertHand(HandLandmarkIndex.middleFingerDip);
+    final leftHandMiddleTip = convertHand(HandLandmarkIndex.middleFingerTip);
     if (leftHandMiddleMcp != null &&
         leftHandMiddlePip != null &&
         leftHandMiddleDip != null &&
@@ -397,6 +531,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Ring finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final leftHandRingMcp = convertHand(HandLandmarkIndex.ringFingerMcp);
+    final leftHandRingPip = convertHand(HandLandmarkIndex.ringFingerPip);
+    final leftHandRingDip = convertHand(HandLandmarkIndex.ringFingerDip);
+    final leftHandRingTip = convertHand(HandLandmarkIndex.ringFingerTip);
     if (leftHandRingMcp != null &&
         leftHandRingPip != null &&
         leftHandRingDip != null &&
@@ -411,6 +549,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Pinky finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final leftHandPinkyMcp = convertHand(HandLandmarkIndex.pinkyMcp);
+    final leftHandPinkyPip = convertHand(HandLandmarkIndex.pinkyPip);
+    final leftHandPinkyDip = convertHand(HandLandmarkIndex.pinkyDip);
+    final leftHandPinkyTip = convertHand(HandLandmarkIndex.pinkyTip);
     if (leftHandPinkyMcp != null &&
         leftHandPinkyPip != null &&
         leftHandPinkyDip != null &&
@@ -440,58 +582,43 @@ MixamoPose buildMixamoPose({
     assignFinger('LeftHandPinky', leftPinkyChain);
   }
 
-  // Right hand fingers
-  if (rightHandLandmarks != null && rightHandLandmarks.isNotEmpty) {
+  // Right hand fingers - Full animation restored
+  if (rightHandLandmarks != null &&
+      rightHandLandmarks.isNotEmpty &&
+      rightWrist != null) {
     // Use detailed hand landmarks from MediaPipe Holistic
-    final rightHandWrist =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.wrist);
-    final rightHandThumbMcp =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.thumbMcp);
-    final rightHandThumbIp =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.thumbIp);
-    final rightHandThumbTip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.thumbTip);
-    final rightHandIndexMcp =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerMcp);
-    final rightHandIndexPip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerPip);
-    final rightHandIndexDip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerDip);
-    final rightHandIndexTip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.indexFingerTip);
-    final rightHandMiddleMcp =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerMcp);
-    final rightHandMiddlePip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerPip);
-    final rightHandMiddleDip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerDip);
-    final rightHandMiddleTip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.middleFingerTip);
-    final rightHandRingMcp =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerMcp);
-    final rightHandRingPip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerPip);
-    final rightHandRingDip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerDip);
-    final rightHandRingTip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.ringFingerTip);
-    final rightHandPinkyMcp =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyMcp);
-    final rightHandPinkyPip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyPip);
-    final rightHandPinkyDip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyDip);
-    final rightHandPinkyTip =
-        _getPoint(rightHandLandmarks, HandLandmarkIndex.pinkyTip);
+    // Convert from normalized image coordinates to world coordinates
+    final rightHandWristRaw = rightHandLandmarks[HandLandmarkIndex.wrist];
+    final rightElbow = _getPoint(landmarksWorld, PoseLandmarkIndex.rightElbow);
 
-    // Update wrist position from hand landmarks if available
-    if (rightHandWrist != null) {
-      mixamoPose['RightHand'] = _clonePoint(rightHandWrist)!;
+    // Wrist position: Always use poseWorld wrist (world coordinates)
+    mixamoPose['RightHand'] = _clonePoint(rightWrist)!;
+
+    // Calculate palm orientation using poseWorldLandmarks (stable 3D coordinates)
+    // Use poseWorldLandmarks for palm orientation, not handLandmarks (unstable z)
+    final rightIndex = _getPoint(landmarksWorld, PoseLandmarkIndex.rightIndex);
+    final rightPinky = _getPoint(landmarksWorld, PoseLandmarkIndex.rightPinky);
+    final shouldFlipRightPalmZ =
+        _shouldFlipPalmNormal(rightWrist, rightIndex, rightPinky, rightElbow);
+
+    // Convert hand landmarks from normalized coordinates to world coordinates
+    // Helper function to convert hand landmark to world space
+    MixamoPoint? convertHand(int index) {
+      if (index < 0 || index >= rightHandLandmarks.length) return null;
+      return _convertHandLandmarkToWorld(
+        rightHandLandmarks[index],
+        rightHandWristRaw,
+        rightWrist,
+        rightElbow,
+        shouldFlipRightPalmZ,
+      );
     }
 
-    // Thumb: CMC -> MCP -> IP -> TIP (4 segments)
-    if (rightHandWrist != null &&
-        rightHandThumbMcp != null &&
+    // Thumb: MCP -> IP -> TIP (3 segments)
+    final rightHandThumbMcp = convertHand(HandLandmarkIndex.thumbMcp);
+    final rightHandThumbIp = convertHand(HandLandmarkIndex.thumbIp);
+    final rightHandThumbTip = convertHand(HandLandmarkIndex.thumbTip);
+    if (rightHandThumbMcp != null &&
         rightHandThumbIp != null &&
         rightHandThumbTip != null) {
       final thumbChain = [
@@ -503,6 +630,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Index finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final rightHandIndexMcp = convertHand(HandLandmarkIndex.indexFingerMcp);
+    final rightHandIndexPip = convertHand(HandLandmarkIndex.indexFingerPip);
+    final rightHandIndexDip = convertHand(HandLandmarkIndex.indexFingerDip);
+    final rightHandIndexTip = convertHand(HandLandmarkIndex.indexFingerTip);
     if (rightHandIndexMcp != null &&
         rightHandIndexPip != null &&
         rightHandIndexDip != null &&
@@ -517,6 +648,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Middle finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final rightHandMiddleMcp = convertHand(HandLandmarkIndex.middleFingerMcp);
+    final rightHandMiddlePip = convertHand(HandLandmarkIndex.middleFingerPip);
+    final rightHandMiddleDip = convertHand(HandLandmarkIndex.middleFingerDip);
+    final rightHandMiddleTip = convertHand(HandLandmarkIndex.middleFingerTip);
     if (rightHandMiddleMcp != null &&
         rightHandMiddlePip != null &&
         rightHandMiddleDip != null &&
@@ -531,6 +666,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Ring finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final rightHandRingMcp = convertHand(HandLandmarkIndex.ringFingerMcp);
+    final rightHandRingPip = convertHand(HandLandmarkIndex.ringFingerPip);
+    final rightHandRingDip = convertHand(HandLandmarkIndex.ringFingerDip);
+    final rightHandRingTip = convertHand(HandLandmarkIndex.ringFingerTip);
     if (rightHandRingMcp != null &&
         rightHandRingPip != null &&
         rightHandRingDip != null &&
@@ -545,6 +684,10 @@ MixamoPose buildMixamoPose({
     }
 
     // Pinky finger: MCP -> PIP -> DIP -> TIP (4 segments)
+    final rightHandPinkyMcp = convertHand(HandLandmarkIndex.pinkyMcp);
+    final rightHandPinkyPip = convertHand(HandLandmarkIndex.pinkyPip);
+    final rightHandPinkyDip = convertHand(HandLandmarkIndex.pinkyDip);
+    final rightHandPinkyTip = convertHand(HandLandmarkIndex.pinkyTip);
     if (rightHandPinkyMcp != null &&
         rightHandPinkyPip != null &&
         rightHandPinkyDip != null &&
@@ -625,7 +768,72 @@ MixamoPose buildMixamoPose({
   return mixamoPose;
 }
 
+/// Get appropriate filter parameters based on body part and visibility.
+/// Option 5: Adaptive filtering with body part-specific parameters and visibility adjustment.
+OneEuroFilterVector3 _getFilterForBodyPart(String key, double visibility) {
+  double baseBeta;
+
+  // Different base beta for different body parts
+  // Hands/Fingers: More responsive (faster movements) - Improved for better hand tracking
+  if (key.contains('Hand') ||
+      key.contains('Finger') ||
+      key.contains('Thumb') ||
+      key.contains('Pinky') ||
+      key.contains('Index') ||
+      key.contains('Middle') ||
+      key.contains('Ring')) {
+    baseBeta =
+        0.35; // Hands: More responsive for better finger tracking (increased from 0.2)
+  }
+  // Head/Neck: Moderate responsiveness
+  else if (key.contains('Head') ||
+      key.contains('Neck') ||
+      key.contains('Eye') ||
+      key.contains('Ear')) {
+    baseBeta = 0.15; // Head: moderate
+  }
+  // Body core (Hips, Spine): Smoother (slower, stable movements)
+  else if (key.contains('Hips') ||
+      key.contains('Spine') ||
+      key.contains('Spine1') ||
+      key.contains('Spine2')) {
+    baseBeta = 0.05; // Core: smooth
+  }
+  // Default: Balanced
+  else {
+    baseBeta = 0.1; // Default: balanced
+  }
+
+  // Adjust based on visibility
+  // Low visibility (< 0.7) = less reliable data = more responsive (higher beta)
+  // High visibility (>= 0.7) = reliable data = can smooth more (lower beta)
+  if (visibility < 0.7) {
+    baseBeta *= 1.5; // Low visibility: more responsive
+  }
+
+  // Clamp beta to reasonable range
+  final finalBeta = baseBeta.clamp(0.05, 0.5);
+
+  // Lower minCutoff for hands/fingers for smoother tracking
+  final minCutoff = (key.contains('Hand') ||
+          key.contains('Finger') ||
+          key.contains('Thumb') ||
+          key.contains('Pinky') ||
+          key.contains('Index') ||
+          key.contains('Middle') ||
+          key.contains('Ring'))
+      ? 0.005 // Hands: Lower cutoff for smoother tracking
+      : 0.01; // Default: Standard cutoff
+
+  return OneEuroFilterVector3(
+    minCutoff: minCutoff,
+    beta: finalBeta,
+    dCutoff: 1.0,
+  );
+}
+
 /// Apply OneEuro filters to all pose points (world space smoothing).
+/// Option 5: Uses adaptive filtering with body part-specific parameters and visibility adjustment.
 void smoothMixamoPose(
   MixamoPose pose,
   double t,
@@ -636,7 +844,7 @@ void smoothMixamoPose(
     if (p == null) return;
     filters.putIfAbsent(
       key,
-      () => OneEuroFilterVector3(minCutoff: 0.01, beta: 0.1, dCutoff: 1.0),
+      () => _getFilterForBodyPart(key, p.visibility),
     );
     final f = filters[key]!;
     final smoothed = f.filter(t, p.position);
