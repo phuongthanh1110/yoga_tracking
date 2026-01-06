@@ -39,9 +39,14 @@ PODS:
     - FlutterAngle (~> 0.0.8)
     - FlutterMacOS
   - FlutterAngle (0.0.8)
+  - path_provider_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
   - SDWebImage (5.21.5):
     - SDWebImage/Core (= 5.21.5)
   - SDWebImage/Core (5.21.5)
+  - share_plus (0.0.1):
+    - Flutter
   - SwiftyGif (5.4.5)
   - three_js_sensors (0.1.2):
     - Flutter
@@ -50,6 +55,8 @@ DEPENDENCIES:
   - file_picker (from `.symlinks/plugins/file_picker/ios`)
   - Flutter (from `Flutter`)
   - flutter_angle (from `.symlinks/plugins/flutter_angle/darwin`)
+  - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
+  - share_plus (from `.symlinks/plugins/share_plus/ios`)
   - three_js_sensors (from `.symlinks/plugins/three_js_sensors/ios`)
 
 SPEC REPOS:
@@ -67,17 +74,23 @@ EXTERNAL SOURCES:
     :path: Flutter
   flutter_angle:
     :path: ".symlinks/plugins/flutter_angle/darwin"
+  path_provider_foundation:
+    :path: ".symlinks/plugins/path_provider_foundation/darwin"
+  share_plus:
+    :path: ".symlinks/plugins/share_plus/ios"
   three_js_sensors:
     :path: ".symlinks/plugins/three_js_sensors/ios"
 
 SPEC CHECKSUMS:
   DKImagePickerController: 946cec48c7873164274ecc4624d19e3da4c1ef3c
   DKPhotoGallery: b3834fecb755ee09a593d7c9e389d8b5d6deed60
-  file_picker: 5f42b9d5580e30b57b4863f9d94b448016b702e5
+  file_picker: a0560bc09d61de87f12d246fc47d2119e6ef37be
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_angle: 7b1a2b3e733221bf2e0325e42fc3edf95b5d44c4
   FlutterAngle: c810891af800750361b1d0e7cc944f2338d5ae18
+  path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
   SDWebImage: e9c98383c7572d713c1a0d7dd2783b10599b9838
+  share_plus: 50da8cb520a8f0f65671c6c6a99b3617ed10a58a
   SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
   three_js_sensors: f516b092803411e05b1e3dc7625efa36acd8f455
 

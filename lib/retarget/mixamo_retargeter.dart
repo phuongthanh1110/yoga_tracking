@@ -27,6 +27,7 @@ class MixamoRetargeter {
   final RootMotionHelper _rootHelper = RootMotionHelper();
   final Quat _hipsBindBasis = Quat();
   final Quat _spineBindBasis = Quat();
+  final Map<String, Quat> _handBindBasis = {};
   double _modelLegLength = 1.0;
 
   // Axis detection (supports Y-up and negative-Z-up rigs)
@@ -66,6 +67,7 @@ class MixamoRetargeter {
     _detectAxes();
     _computeModelLegLength();
     _computeSpineBasis();
+    _computeHandBindBasis();
   }
 
   void _computeHipsBasis() {
@@ -178,6 +180,48 @@ class MixamoRetargeter {
     _spineBindBasis.copyFrom(_quatFromBasis(orthoRight, up, fwd));
   }
 
+  void _computeHandBindBasis() {
+    _handBindBasis.clear();
+
+    Quat? buildBasis(String sidePrefix) {
+      final wrist = _bindPose['${sidePrefix}Hand'];
+      final index = _bindPose['${sidePrefix}HandIndex1'];
+      final pinky = _bindPose['${sidePrefix}HandPinky1'];
+      final middle = _bindPose['${sidePrefix}HandMiddle1'];
+      if (wrist == null || index == null || pinky == null) return null;
+
+      final across = Vec3.clone(index.position)..sub(pinky.position);
+      if (across.lengthSq < 1e-6) return null;
+      across.normalize();
+
+      final forwardSource =
+          middle ?? index; // fall back to index if middle is missing
+      final forward = Vec3.clone(forwardSource.position)
+        ..sub(wrist.position)
+        ..normalize();
+      if (forward.lengthSq < 1e-6) return null;
+
+      var normal = Vec3.clone(across)..cross(forward);
+      if (normal.lengthSq < 1e-6) {
+        normal = Vec3.clone(forward).cross(across);
+      }
+      if (normal.lengthSq < 1e-6) return null;
+      normal.normalize();
+
+      // Orthonormalize to avoid skew
+      final orthoAcross = Vec3.clone(normal)..cross(forward)..normalize();
+      final orthoForward = Vec3.clone(orthoAcross)..cross(normal)..normalize();
+
+      return _quatFromBasis(orthoAcross, normal, orthoForward);
+    }
+
+    final leftBasis = buildBasis('Left');
+    if (leftBasis != null) _handBindBasis['LeftHand'] = leftBasis;
+
+    final rightBasis = buildBasis('Right');
+    if (rightBasis != null) _handBindBasis['RightHand'] = rightBasis;
+  }
+
   void applyPose({
     required MixamoPose pose,
     required List<dynamic> poseLandmarks,
@@ -189,6 +233,7 @@ class MixamoRetargeter {
     _positionHips(pose, poseLandmarks, videoWidth, videoHeight);
     _handleHips(pose);
     _handleSpine(pose);
+    _handleHands(pose);
 
     for (final link in _chainLinks) {
       _alignBone(link.$1, link.$2, pose);
@@ -372,7 +417,85 @@ class MixamoRetargeter {
     }
   }
 
+  void _handleHands(MixamoPose pose) {
+    void applyHand(String sidePrefix) {
+      final handName = '${sidePrefix}Hand';
+      final indexName = '${sidePrefix}HandIndex1';
+      final pinkyName = '${sidePrefix}HandPinky1';
+      final middleName = '${sidePrefix}HandMiddle1';
+      final elbowName = '${sidePrefix}ForeArm';
+
+      final handBone = bones[handName];
+      final wrist = pose[handName];
+      final index = pose[indexName];
+      final pinky = pose[pinkyName];
+      final middle = pose[middleName] ?? pose[indexName];
+      final elbow = pose[elbowName];
+      final bind = _bindPose[handName];
+      final bindBasis = _handBindBasis[handName];
+
+      if (handBone == null ||
+          wrist == null ||
+          index == null ||
+          pinky == null ||
+          middle == null ||
+          elbow == null ||
+          bind == null ||
+          bindBasis == null) {
+        return;
+      }
+
+      if (wrist.visibility < visibilityThreshold ||
+          index.visibility < visibilityThreshold ||
+          pinky.visibility < visibilityThreshold) {
+        return;
+      }
+
+      final across = Vec3.clone(index.position)..sub(pinky.position);
+      if (across.lengthSq < 1e-6) return;
+      across.normalize();
+
+      final forward = Vec3.clone(middle.position)..sub(wrist.position);
+      if (forward.lengthSq < 1e-6) return;
+      forward.normalize();
+
+      // Palm normal (across x forward)
+      var normal = Vec3.clone(across)..cross(forward);
+      if (normal.lengthSq < 1e-6) {
+        normal = Vec3.clone(forward).cross(across);
+      }
+      if (normal.lengthSq < 1e-6) return;
+      normal.normalize();
+
+      // Disambiguate palm facing using elbow direction
+      final elbowDir = Vec3.clone(wrist.position)..sub(elbow.position);
+      if (elbowDir.lengthSq > 1e-6) {
+        elbowDir.normalize();
+        if (normal.dot(elbowDir) > 0) {
+          normal.scale(-1); // Flip so palm faces away from elbow
+        }
+      }
+
+      // Orthonormalize
+      final orthoAcross = Vec3.clone(normal)..cross(forward)..normalize();
+      final orthoForward = Vec3.clone(orthoAcross)..cross(normal)..normalize();
+
+      final targetQuat = _quatFromBasis(orthoAcross, normal, orthoForward);
+      final delta = Quat.clone(targetQuat)..multiply(_invert(bindBasis));
+      final targetWorld = Quat.clone(delta)..multiply(bind.quaternion);
+
+      // Slightly higher blend to keep wrists responsive
+      _applyWorldRotationToBone(handBone, targetWorld, 0.65);
+    }
+
+    applyHand('Left');
+    applyHand('Right');
+  }
+
   void _alignBone(String parentName, String childName, MixamoPose pose) {
+    if (parentName == 'LeftHand' || parentName == 'RightHand') {
+      return; // Dedicated wrist handler manages hand rotation
+    }
     final parentBone = bones[parentName];
     final parentPose = pose[parentName];
     final childPose = pose[childName];

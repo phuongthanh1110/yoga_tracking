@@ -783,7 +783,7 @@ OneEuroFilterVector3 _getFilterForBodyPart(String key, double visibility) {
       key.contains('Middle') ||
       key.contains('Ring')) {
     baseBeta =
-        0.35; // Hands: More responsive for better finger tracking (increased from 0.2)
+        0.45; // Hands: More responsive for better finger tracking (reduced lag)
   }
   // Head/Neck: Moderate responsiveness
   else if (key.contains('Head') ||
@@ -822,7 +822,7 @@ OneEuroFilterVector3 _getFilterForBodyPart(String key, double visibility) {
           key.contains('Index') ||
           key.contains('Middle') ||
           key.contains('Ring'))
-      ? 0.005 // Hands: Lower cutoff for smoother tracking
+      ? 0.003 // Hands: Lower cutoff for smoother tracking and less lag
       : 0.01; // Default: Standard cutoff
 
   return OneEuroFilterVector3(
