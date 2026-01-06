@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'math_types.dart';
 import 'one_euro_filter.dart';
 
@@ -137,6 +139,133 @@ MixamoPoint? _clonePoint(MixamoPoint? p) {
       position: Vec3.clone(p.position), visibility: p.visibility);
 }
 
+/// State manager for palm orientation smoothing with temporal continuity.
+/// Maintains previous palm normals and applies slerp smoothing to prevent flips.
+class PalmOrientationSmoother {
+  Vec3? _leftPalmNormalPrev;
+  Vec3? _rightPalmNormalPrev;
+  static const double _slerpFactor = 0.3; // Smoothing factor (0.0 = no smoothing, 1.0 = full smoothing)
+
+  /// Reset state (call when starting new video/sequence)
+  void reset() {
+    _leftPalmNormalPrev = null;
+    _rightPalmNormalPrev = null;
+  }
+
+  /// Calculate palm normal vector from poseWorldLandmarks (stable 3D coordinates)
+  /// with temporal continuity and slerp smoothing.
+  /// Returns true if palm normal should be flipped (palm facing away), false otherwise.
+  ///
+  /// Strategy:
+  /// 1. Use poseWorldLandmarks (wrist, index, pinky) for palm orientation - stable 3D coordinates
+  /// 2. Calculate palm normal from cross product: (wrist → index) × (index → pinky)
+  /// 3. Apply temporal continuity: if dot(nPalm, nPalm_prev) < 0, flip nPalm to keep same direction
+  /// 4. Apply slerp smoothing for smooth transitions
+  /// 5. Disambiguate using elbow direction: if palm normal points toward elbow, flip it
+  bool shouldFlipPalmNormal(
+    MixamoPoint? poseWrist,
+    MixamoPoint? poseIndex,
+    MixamoPoint? posePinky,
+    MixamoPoint? poseElbow,
+    bool isLeftHand,
+  ) {
+    if (poseWrist == null ||
+        poseIndex == null ||
+        posePinky == null ||
+        poseElbow == null) {
+      return false; // Default: no flip
+    }
+
+    // Use poseWorldLandmarks (stable 3D world coordinates) for palm orientation
+    // vAcross: ngang lòng bàn tay (index → pinky)
+    final vAcross = Vec3.clone(posePinky.position)..sub(poseIndex.position);
+    if (vAcross.lengthSq < 1e-6) return false;
+
+    // vForward: dọc bàn tay (wrist → index)
+    final vForward = Vec3.clone(poseIndex.position)..sub(poseWrist.position);
+    if (vForward.lengthSq < 1e-6) return false;
+
+    // Palm normal: cross(vAcross, vForward)
+    // Using poseWorldLandmarks ensures stable 3D coordinates (no unstable z from normalized handLandmarks)
+    var palmNormal = Vec3.clone(vAcross)..cross(vForward);
+    if (palmNormal.lengthSq < 1e-6) return false; // Vectors are parallel
+    palmNormal.normalize();
+
+    // Temporal continuity: if dot(nPalm, nPalm_prev) < 0, flip nPalm to keep same direction
+    final prevNormal = isLeftHand ? _leftPalmNormalPrev : _rightPalmNormalPrev;
+    if (prevNormal != null) {
+      final dotWithPrev = palmNormal.dot(prevNormal);
+      if (dotWithPrev < 0.0) {
+        // Flip to maintain continuity with previous frame
+        palmNormal.scale(-1.0);
+      }
+
+      // Slerp smoothing: interpolate between previous and current palm normal
+      // Convert to quaternion for slerp, then back to vector
+      final prevQuat = _vec3ToQuat(prevNormal);
+      final currQuat = _vec3ToQuat(palmNormal);
+      final smoothedQuat = Quat.clone(prevQuat)..slerp(currQuat, 1.0 - _slerpFactor);
+      palmNormal = _quatToVec3(smoothedQuat);
+      palmNormal.normalize();
+    }
+
+    // Update previous palm normal
+    if (isLeftHand) {
+      _leftPalmNormalPrev = Vec3.clone(palmNormal);
+    } else {
+      _rightPalmNormalPrev = Vec3.clone(palmNormal);
+    }
+
+    // Elbow direction: elbow → wrist (in world coordinates, already axis-adjusted)
+    final elbowDirection = Vec3.clone(poseWrist.position)
+      ..sub(poseElbow.position);
+    if (elbowDirection.lengthSq < 1e-6) return false;
+    elbowDirection.normalize();
+
+    // Disambiguate: if palm normal points toward elbow (positive dot product),
+    // it means palm is facing toward elbow, so we need to flip Z axis
+    final dotProduct = palmNormal.dot(elbowDirection);
+    // If dot product > 0: palm normal points in same direction as elbow direction
+    // (palm facing toward elbow) → need to flip Z axis
+    // If dot product < 0: palm normal points away from elbow → no flip needed
+    return dotProduct > 0.0;
+  }
+
+  /// Convert Vec3 to Quat (for slerp smoothing)
+  /// Uses a default "up" vector to create a rotation quaternion
+  Quat _vec3ToQuat(Vec3 v) {
+    // Create a quaternion that rotates from default direction (0,0,1) to v
+    final defaultDir = Vec3(0, 0, 1);
+    final dot = v.dot(defaultDir);
+    if (dot.abs() > 0.9999) {
+      // Vectors are parallel - return identity quaternion
+      return Quat(0, 0, 0, 1);
+    }
+    final axis = Vec3.clone(defaultDir)..cross(v)..normalize();
+    final angle = math.acos(dot.clamp(-1.0, 1.0));
+    final halfAngle = angle * 0.5;
+    final s = math.sin(halfAngle);
+    return Quat(axis.x * s, axis.y * s, axis.z * s, math.cos(halfAngle));
+  }
+
+  /// Convert Quat back to Vec3 (for slerp smoothing)
+  /// Rotates default direction (0,0,1) by the quaternion
+  /// Formula: v' = q * v * q^-1
+  Vec3 _quatToVec3(Quat q) {
+    final defaultDir = Vec3(0, 0, 1);
+    // Rotate vector using quaternion: v' = q * v * q^-1
+    // Optimized formula: v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)
+    final qxyz = Vec3(q.x, q.y, q.z);
+    final cross1 = Vec3.clone(qxyz)..cross(defaultDir);
+    final scaled = Vec3.clone(defaultDir)..scale(q.w);
+    cross1.add(scaled);
+    final cross2 = Vec3.clone(qxyz)..cross(cross1);
+    cross2.scale(2.0);
+    final rotated = Vec3.clone(defaultDir)..add(cross2);
+    return rotated;
+  }
+}
+
 /// Calculate palm normal vector from poseWorldLandmarks (stable 3D coordinates)
 /// and disambiguate using elbow direction.
 /// Returns true if palm normal should be flipped (palm facing away), false otherwise.
@@ -148,6 +277,8 @@ MixamoPoint? _clonePoint(MixamoPoint? p) {
 ///
 /// Note: handLandmarks are normalized 2D-ish with unstable z, so we use poseWorldLandmarks
 /// for orientation. handLandmarks should only be used for finger flexion, not palm orientation.
+/// 
+/// Deprecated: Use PalmOrientationSmoother.shouldFlipPalmNormal for temporal continuity and smoothing.
 bool _shouldFlipPalmNormal(
   MixamoPoint? poseWrist,
   MixamoPoint? poseIndex,
@@ -344,10 +475,12 @@ List<MixamoPoint> _createFingerChain(
 
 /// Build Mixamo-like pose from MediaPipe world landmarks.
 /// Optionally uses hand landmarks from MediaPipe Holistic for more accurate finger tracking.
+/// [palmSmoother]: Optional palm orientation smoother for temporal continuity and smoothing.
 MixamoPose buildMixamoPose({
   required List<dynamic> landmarksWorld,
   List<dynamic>? leftHandLandmarks,
   List<dynamic>? rightHandLandmarks,
+  PalmOrientationSmoother? palmSmoother,
 }) {
   if (landmarksWorld.isEmpty) return {};
 
@@ -463,8 +596,10 @@ MixamoPose buildMixamoPose({
     // Use poseWorldLandmarks for palm orientation, not handLandmarks (unstable z)
     final leftIndex = _getPoint(landmarksWorld, PoseLandmarkIndex.leftIndex);
     final leftPinky = _getPoint(landmarksWorld, PoseLandmarkIndex.leftPinky);
-    final shouldFlipLeftPalmZ =
-        _shouldFlipPalmNormal(leftWrist, leftIndex, leftPinky, leftElbow);
+    final shouldFlipLeftPalmZ = palmSmoother != null
+        ? palmSmoother.shouldFlipPalmNormal(
+            leftWrist, leftIndex, leftPinky, leftElbow, true)
+        : _shouldFlipPalmNormal(leftWrist, leftIndex, leftPinky, leftElbow);
 
     // Convert hand landmarks from normalized coordinates to world coordinates
     // Helper function to convert hand landmark to world space
@@ -598,8 +733,10 @@ MixamoPose buildMixamoPose({
     // Use poseWorldLandmarks for palm orientation, not handLandmarks (unstable z)
     final rightIndex = _getPoint(landmarksWorld, PoseLandmarkIndex.rightIndex);
     final rightPinky = _getPoint(landmarksWorld, PoseLandmarkIndex.rightPinky);
-    final shouldFlipRightPalmZ =
-        _shouldFlipPalmNormal(rightWrist, rightIndex, rightPinky, rightElbow);
+    final shouldFlipRightPalmZ = palmSmoother != null
+        ? palmSmoother.shouldFlipPalmNormal(
+            rightWrist, rightIndex, rightPinky, rightElbow, false)
+        : _shouldFlipPalmNormal(rightWrist, rightIndex, rightPinky, rightElbow);
 
     // Convert hand landmarks from normalized coordinates to world coordinates
     // Helper function to convert hand landmark to world space

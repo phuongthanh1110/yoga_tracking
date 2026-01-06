@@ -8,6 +8,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:cross_file/cross_file.dart';
 import '../retarget/mixamo_mapping.dart' as mapping;
 import '../retarget/one_euro_filter.dart';
 import '../services/pose_api_client.dart';
@@ -75,6 +76,8 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   bool _printedMixamo = false;
   MixamoRetargeter? _retargeter;
   final Map<String, OneEuroFilterVector3> _poseFilters = {};
+  final mapping.PalmOrientationSmoother _palmSmoother =
+      mapping.PalmOrientationSmoother();
   Timer? _poseTimer;
   List<FramePose> _poseFrames = const [];
   int _poseFrameIndex = 0;
@@ -568,6 +571,8 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     }
     _cancelPosePlayback();
     _poseFilters.clear();
+    _palmSmoother.reset(); // Reset palm orientation smoother for new video
+    _retargeter?.resetSmoothing(); // Reset advanced smoothing
     _isPosePlaying = true;
     _mixer?.stopAllAction();
     debugPrint('[PosePlayback] Uploading video for pose extraction...');
@@ -666,6 +671,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       landmarksWorld: frame.landmarksWorld,
       leftHandLandmarks: leftHand,
       rightHandLandmarks: rightHand,
+      palmSmoother: _palmSmoother,
     );
     if (pose.isEmpty) return;
     final t = _poseFrameIndex /
@@ -676,6 +682,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       poseLandmarks: frame.landmarks,
       videoWidth: meta.width.toDouble(),
       videoHeight: meta.height.toDouble(),
+      timestamp: t,
     );
   }
 
@@ -716,7 +723,10 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     if (retargeter == null) return;
     if (frame.worldLandmarks.isEmpty) return;
 
-    final pose = mapping.buildMixamoPose(landmarksWorld: frame.worldLandmarks);
+    final pose = mapping.buildMixamoPose(
+      landmarksWorld: frame.worldLandmarks,
+      palmSmoother: _palmSmoother,
+    );
     if (pose.isEmpty) return;
 
     final t = DateTime.now().millisecondsSinceEpoch / 1000.0;
@@ -1200,4 +1210,4 @@ const List<String> _canonicalBones = [
 /// - Real device on same network: use your machine's IP like 'http://192.168.1.65:8000'
 /// - Make sure backend is running with: uvicorn main:app --host 0.0.0.0 --port 8000
 const String poseApiBaseUrl =
-    'http://localhost:8000'; // Change to your actual backend URL
+    'http://192.168.1.20:8000'; // Change to your actual backend URL

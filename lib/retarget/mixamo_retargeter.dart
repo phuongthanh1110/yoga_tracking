@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'advanced_smoothing.dart';
 import 'hip_translation.dart';
 import 'math_types.dart';
 import 'mixamo_mapping.dart';
@@ -15,19 +16,32 @@ class MixamoRetargeter {
     required this.modelRoot,
     required Map<String, dynamic> bones,
     this.visibilityThreshold = _defaultVisibilityThreshold,
-  }) : bones = Map.unmodifiable(bones) {
+    SmoothingConfig? smoothingConfig,
+    bool enableAdvancedSmoothing = true,
+  })  : bones = Map.unmodifiable(bones),
+        _smoothingConfig = smoothingConfig ?? const SmoothingConfig(),
+        _enableAdvancedSmoothing = enableAdvancedSmoothing {
     _recomputeBindPose();
+    if (_enableAdvancedSmoothing) {
+      _boneSmoother = BoneRotationSmoother(config: _smoothingConfig);
+    }
   }
 
   final dynamic modelRoot;
   final Map<String, dynamic> bones;
   final double visibilityThreshold;
+  final SmoothingConfig _smoothingConfig;
+  final bool _enableAdvancedSmoothing;
 
   final Map<String, _BindInfo> _bindPose = {};
   final RootMotionHelper _rootHelper = RootMotionHelper();
   final Quat _hipsBindBasis = Quat();
   final Quat _spineBindBasis = Quat();
   double _modelLegLength = 1.0;
+
+  // Advanced smoothing
+  BoneRotationSmoother? _boneSmoother;
+  double _currentTime = 0.0;
 
   // Axis detection (supports Y-up and negative-Z-up rigs)
   String _verticalAxis = 'y';
@@ -183,8 +197,16 @@ class MixamoRetargeter {
     required List<dynamic> poseLandmarks,
     required double videoWidth,
     required double videoHeight,
+    double? timestamp,
   }) {
     if (pose.isEmpty) return;
+
+    // Update timestamp for smoothing
+    if (timestamp != null) {
+      _currentTime = timestamp;
+    } else {
+      _currentTime += 0.033; // Default 30fps
+    }
 
     _positionHips(pose, poseLandmarks, videoWidth, videoHeight);
     _handleHips(pose);
@@ -197,6 +219,12 @@ class MixamoRetargeter {
     try {
       modelRoot.updateMatrixWorld(true);
     } catch (_) {}
+  }
+
+  /// Reset smoothing state (call when starting new video/animation)
+  void resetSmoothing() {
+    _boneSmoother?.reset();
+    _currentTime = 0.0;
   }
 
   void _positionHips(
@@ -317,7 +345,7 @@ class MixamoRetargeter {
     if (hipsBind == null) return;
 
     final targetWorld = Quat.clone(delta)..multiply(hipsBind.quaternion);
-    _applyWorldRotationToBone(hipBone, targetWorld, 0.5);
+    _applyWorldRotationToBone(hipBone, targetWorld, 0.5, 'Hips');
   }
 
   void _handleSpine(MixamoPose pose) {
@@ -360,7 +388,7 @@ class MixamoRetargeter {
     if (spineBind == null) return;
 
     final targetWorld = Quat.clone(delta)..multiply(spineBind.quaternion);
-    _applyWorldRotationToBone(spineBone, targetWorld, 0.5);
+    _applyWorldRotationToBone(spineBone, targetWorld, 0.5, 'Spine');
 
     final spine1Bind = _bindPose['Spine1'];
     final spine2Bind = _bindPose['Spine2'];
@@ -389,12 +417,31 @@ class MixamoRetargeter {
 
     final rotDelta = _quatFromUnitVectors(bindDir, targetDir);
     final targetWorld = Quat.clone(rotDelta)..multiply(bind.quaternion);
-    _applyWorldRotationToBone(parentBone, targetWorld, 0.5);
+
+    // Use higher interpolation factor for hand bones for better responsiveness
+    final isHandBone = _isHandBone(parentName);
+    final interpolationFactor = isHandBone ? 0.75 : 0.5;
+
+    _applyWorldRotationToBone(
+        parentBone, targetWorld, interpolationFactor, parentName);
+  }
+
+  /// Check if bone is part of hand (hand or finger bones)
+  bool _isHandBone(String boneName) {
+    return boneName.contains('Hand') &&
+        (boneName.contains('Thumb') ||
+            boneName.contains('Index') ||
+            boneName.contains('Middle') ||
+            boneName.contains('Ring') ||
+            boneName.contains('Pinky') ||
+            boneName == 'LeftHand' ||
+            boneName == 'RightHand');
   }
 
   // --- Helpers ---
 
-  void _applyWorldRotationToBone(dynamic bone, Quat targetWorld, double t) {
+  void _applyWorldRotationToBone(dynamic bone, Quat targetWorld, double t,
+      [String? boneName]) {
     Quat newLocal = targetWorld;
 
     if (bone is three.Object3D && bone.parent != null) {
@@ -412,7 +459,30 @@ class MixamoRetargeter {
     }
 
     newLocal.normalized();
-    _slerpBoneQuat(bone, newLocal, t);
+
+    // Apply advanced smoothing if enabled
+    if (_enableAdvancedSmoothing && _boneSmoother != null && boneName != null) {
+      final smoothed =
+          _boneSmoother!.smoothRotation(boneName, _currentTime, newLocal);
+      // Use adaptive interpolation factor, but adjust for hand bones
+      double adaptiveT =
+          _boneSmoother!.getAdaptiveInterpolationFactor(boneName);
+
+      // Increase interpolation factor for hand bones for better responsiveness
+      if (_isHandBone(boneName)) {
+        adaptiveT =
+            math.min(adaptiveT * 1.2, 0.85); // Boost hand bones, cap at 0.85
+      }
+
+      _slerpBoneQuat(bone, smoothed, adaptiveT);
+    } else {
+      // For hand bones without smoothing, use higher interpolation factor
+      final finalT = (boneName != null && _isHandBone(boneName))
+          ? math.min(t * 1.5, 0.8)
+          : t;
+      _slerpBoneQuat(bone, newLocal, finalT);
+    }
+
     _updateBoneMatrix(bone);
   }
 
