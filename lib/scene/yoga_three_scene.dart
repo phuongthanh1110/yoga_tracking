@@ -1210,4 +1210,4 @@ const List<String> _canonicalBones = [
 /// - Real device on same network: use your machine's IP like 'http://192.168.1.65:8000'
 /// - Make sure backend is running with: uvicorn main:app --host 0.0.0.0 --port 8000
 const String poseApiBaseUrl =
-    'http://192.168.1.20:8000'; // Change to your actual backend URL
+    'https://hortense-apophyseal-untransparently.ngrok-free.dev'; // Change to your actual backend URL

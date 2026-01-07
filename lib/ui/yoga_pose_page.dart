@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 
 import '../scene/yoga_three_scene.dart';
 import '../utils/device_info.dart';
+import 'trainer_selection_page.dart';
 
 /// High–level screen widget (UI layer).
 /// - Single Responsibility: only builds UI and passes callbacks/flags to the scene.
@@ -80,6 +81,10 @@ class YogaPosePage extends StatelessWidget {
     }
   }
 
+  // Backend URL - configure this based on your environment
+  static const String _backendUrl =
+      'https://hortense-apophyseal-untransparently.ngrok-free.dev';
+
   List<Widget> _buildControlButtons(
     BuildContext context, {
     required double buttonSize,
@@ -127,7 +132,24 @@ class YogaPosePage extends StatelessWidget {
         onPressed: () => YogaThreeSceneCommands.of(context)?.downloadPoseJson(),
         buttonSize: buttonSize,
       ),
+      // Pose Comparison Feature Button
+      _buildControlButton(
+        context,
+        icon: Icon(Icons.compare, size: iconSize, color: Colors.white),
+        onPressed: () => _navigateToComparison(context),
+        buttonSize: buttonSize,
+      ),
     ];
+  }
+
+  void _navigateToComparison(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => const TrainerSelectionPage(
+          baseUrl: _backendUrl,
+        ),
+      ),
+    );
   }
 
   Widget _buildControlButton(
