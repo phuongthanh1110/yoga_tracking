@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+
+import 'camera_pose_source.dart';
 
 /// Simple data model for one pose frame.
 /// - S: separate data model from rendering and plugins (Single Responsibility).
@@ -29,7 +32,23 @@ abstract class PoseSource {
   /// Process a local video file for pose extraction (e.g., user-uploaded).
   Future<void> startFromVideo(File videoFile);
 
+  /// Switch between front/back camera if supported.
+  /// Default: no-op.
+  Future<void> switchCamera() async {}
+
+  /// Video recording (Direction B): record user video then send to backend.
+  /// Default: not supported.
+  bool get canRecordVideo => false;
+  Future<void> startVideoRecording() async {}
+  Future<File?> stopVideoRecording() async => null;
+
   Future<void> stop();
+
+  /// Dispose resources permanently. After this, the instance should not be reused.
+  /// Default: just stop.
+  Future<void> dispose() async {
+    await stop();
+  }
 
   /// Optional platform preview widget (e.g., camera texture).
   /// Return null if not available.
@@ -54,7 +73,30 @@ class DummyPoseSource implements PoseSource {
   }
 
   @override
+  Future<void> switchCamera() async {
+    // no-op
+  }
+
+  @override
+  bool get canRecordVideo => false;
+
+  @override
+  Future<void> startVideoRecording() async {
+    // no-op
+  }
+
+  @override
+  Future<File?> stopVideoRecording() async {
+    return null;
+  }
+
+  @override
   Future<void> stop() async {
+    // no-op: keep stream alive so caller can start() again
+  }
+
+  @override
+  Future<void> dispose() async {
     await _controller.close();
   }
 
@@ -74,5 +116,8 @@ class DummyPoseSource implements PoseSource {
 /// Factory that selects default mobile implementation.
 /// Replace with platform-specific MediaPipe implementations.
 PoseSource createDefaultPoseSource() {
+  if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+    return CameraPoseSource();
+  }
   return DummyPoseSource();
 }

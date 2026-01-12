@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
+import '../scoring/score_result.dart';
 
 class LandmarkPoint {
   LandmarkPoint({
@@ -270,7 +271,12 @@ class PoseApiClient {
     Function(double progress)? onProgress,
   }) async {
     final uri = Uri.parse('$baseUrl/pose/extract/stream?stride=$stride');
+    print('[PoseApiClient] Uploading to: $uri');
+    print('[PoseApiClient] Video file: ${videoFile.path}');
+
     final contentType = _guessContentType(videoFile.path);
+    print('[PoseApiClient] Content type: $contentType');
+
     final request = http.MultipartRequest('POST', uri)
       ..files.add(
         await http.MultipartFile.fromPath(
@@ -280,12 +286,25 @@ class PoseApiClient {
         ),
       );
 
-    final streamed = await request.send();
+    print('[PoseApiClient] Sending request...');
+    // Video processing can take time; keep connect timeout generous.
+    final streamed = await request.send().timeout(
+      const Duration(minutes: 5),
+      onTimeout: () {
+        throw Exception('Request timeout after 5 minutes');
+      },
+    );
+
+    print('[PoseApiClient] Response status: ${streamed.statusCode}');
+
     if (streamed.statusCode != 200) {
       final errorBody = await http.Response.fromStream(streamed);
+      print('[PoseApiClient] Error response: ${errorBody.body}');
       throw Exception(
           'Pose extraction failed (${streamed.statusCode}): ${errorBody.body}');
     }
+
+    print('[PoseApiClient] Starting to parse SSE stream...');
 
     // Parse SSE stream
     final responseStream = streamed.stream.transform(utf8.decoder);
@@ -374,5 +393,36 @@ class PoseApiClient {
     }
 
     return result;
+  }
+
+  /// Compare reference poses with user poses and get score.
+  Future<ScoreResult> comparePoses({
+    required List<FramePose> referenceFrames,
+    required List<FramePose> userFrames,
+    required double referenceFps,
+    required double userFps,
+  }) async {
+    final uri = Uri.parse('$baseUrl/pose/compare');
+
+    final requestBody = {
+      'reference_frames': referenceFrames.map((f) => f.toJson()).toList(),
+      'user_frames': userFrames.map((f) => f.toJson()).toList(),
+      'reference_fps': referenceFps,
+      'user_fps': userFps,
+    };
+
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode(requestBody),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(
+          'Pose comparison failed (${response.statusCode}): ${response.body}');
+    }
+
+    final data = json.decode(response.body) as Map<String, dynamic>;
+    return ScoreResult.fromJson(data);
   }
 }

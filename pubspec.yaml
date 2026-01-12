@@ -13,6 +13,9 @@ dependencies:
   # State management / utilities
   flutter_hooks: ^0.20.5
 
+  # Camera (for live preview on device)
+  camera: ^0.10.6
+
   # HTTP client for backend calls
   http: ^1.1.0
 

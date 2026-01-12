@@ -14,6 +14,10 @@ import '../retarget/one_euro_filter.dart';
 import '../services/pose_api_client.dart';
 import '../retarget/mixamo_retargeter.dart';
 import '../pose/pose_source.dart';
+import '../practice/practice_state.dart';
+import '../practice/reference_pose_recorder.dart';
+import '../practice/user_pose_recorder.dart';
+import '../scoring/score_display.dart';
 import 'package:three_js/three_js.dart' as three;
 import 'package:three_js_advanced_loaders/three_js_advanced_loaders.dart';
 
@@ -27,6 +31,13 @@ class YogaThreeSceneCommands extends InheritedWidget {
   final void Function(double) updateModelScale;
   final void Function(double) updatePlaybackSpeed;
   final VoidCallback downloadPoseJson;
+  final VoidCallback startPracticeWithDemo;
+  final void Function(File file) startPracticeWithVideo;
+  final VoidCallback startUserPractice;
+  final VoidCallback finishPractice;
+  final VoidCallback resetPractice;
+  final PracticeState Function() getPracticeState;
+  final VoidCallback toggleCameraFacing;
 
   const YogaThreeSceneCommands({
     super.key,
@@ -38,10 +49,17 @@ class YogaThreeSceneCommands extends InheritedWidget {
     required this.updateModelScale,
     required this.updatePlaybackSpeed,
     required this.downloadPoseJson,
+    required this.startPracticeWithDemo,
+    required this.startPracticeWithVideo,
+    required this.startUserPractice,
+    required this.finishPractice,
+    required this.resetPractice,
+    required this.getPracticeState,
+    required this.toggleCameraFacing,
   });
 
   static YogaThreeSceneCommands? of(BuildContext context) {
-    return context.dependOnInheritedWidgetOfExactType<YogaThreeSceneCommands>();
+    return context.findAncestorWidgetOfExactType<YogaThreeSceneCommands>();
   }
 
   @override
@@ -94,6 +112,12 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
   final ValueNotifier<double?> _processingProgressNotifier =
       ValueNotifier<double?>(null);
 
+  // Practice mode
+  PracticeState _practiceState = PracticeState.idle;
+  final ReferencePoseRecorder _referenceRecorder = ReferencePoseRecorder();
+  late final UserPoseRecorder _userRecorder;
+  bool _isUserRecordingVideo = false;
+
   // Model scale control
   double _modelScale = 0.7;
 
@@ -108,24 +132,51 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       3; // pitch: 120° = looking up from below (hướng từ dưới lên)
   double _startRadius = 4.0;
 
+  // Live camera preview sizing (responsive)
+  static const double _livePreviewWidthFactor = 0.35; // 35% screen width
+  static const double _livePreviewMinWidth = 160.0;
+  static const double _livePreviewMaxWidth = 360.0;
+  static const double _livePreviewAspectHeightOverWidth = 3.0 / 4.0; // 4:3
+
   @override
   void initState() {
     super.initState();
+    _userRecorder = UserPoseRecorder(_livePoseSource);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final mq = MediaQuery.of(context);
-      _width = mq.size.width;
-      _height = mq.size.height;
+      if (!mounted) return;
+      final mq = MediaQuery.maybeOf(context);
+      if (mq != null) {
+        _width = mq.size.width;
+        _height = mq.size.height;
+      }
       _initThree();
     });
   }
 
   @override
   void dispose() {
+    // Cancel all timers and subscriptions first
     _poseTimer?.cancel();
+    _poseTimer = null;
     _livePoseSub?.cancel();
-    _livePoseSource.stop();
+    _livePoseSub = null;
+
+    // Stop recording (fire and forget - don't await in dispose)
+    if (_userRecorder.isRecording) {
+      _userRecorder.stopRecording().catchError((_) {
+        // Ignore errors during dispose
+      });
+    }
+
+    // Dispose pose source (fire and forget)
+    _livePoseSource.dispose().catchError((_) {
+      // Ignore errors during dispose
+    });
+
+    // Dispose resources
     _threeJs?.dispose();
     _processingProgressNotifier.dispose();
+
     super.dispose();
   }
 
@@ -141,6 +192,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     setState(() => _isLoading = true);
     _threeJs = three.ThreeJS(
       onSetupComplete: () async {
+        if (!mounted) return;
         setState(() {
           _isLoading = false;
         });
@@ -364,6 +416,35 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       updateModelScale: updateModelScale,
       updatePlaybackSpeed: updatePlaybackSpeed,
       downloadPoseJson: downloadPoseJson,
+      startPracticeWithDemo: startPracticeWithDemo,
+      startPracticeWithVideo: startPracticeWithVideo,
+      startUserPractice: startUserPractice,
+      finishPractice: finishPractice,
+      resetPractice: resetPractice,
+      getPracticeState: () => _practiceState,
+      toggleCameraFacing: () async {
+        if (_isUserRecordingVideo) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Cannot switch camera while recording.'),
+              ),
+            );
+          }
+          return;
+        }
+        // Ensure camera started so flipping works even if user taps flip first.
+        try {
+          await _livePoseSource.start();
+        } catch (_) {
+          // ignore
+        }
+        await _livePoseSource.switchCamera();
+        if (!mounted) return;
+        setState(() {
+          _livePreview = _livePoseSource.preview;
+        });
+      },
       child: ValueListenableBuilder<double?>(
         valueListenable: _processingProgressNotifier,
         builder: (context, progress, _) {
@@ -418,8 +499,15 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(8),
                     child: Container(
-                      width: 160,
-                      height: 120,
+                      width: (MediaQuery.sizeOf(context).width *
+                              _livePreviewWidthFactor)
+                          .clamp(_livePreviewMinWidth, _livePreviewMaxWidth)
+                          .toDouble(),
+                      height: ((MediaQuery.sizeOf(context).width *
+                                  _livePreviewWidthFactor)
+                              .clamp(_livePreviewMinWidth, _livePreviewMaxWidth)
+                              .toDouble()) *
+                          _livePreviewAspectHeightOverWidth,
                       decoration: BoxDecoration(
                         color: Colors.black,
                         border: Border.all(color: Colors.white24),
@@ -540,7 +628,7 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     );
   }
 
-  void _playDemoYogaAnimation() {
+  void _playDemoYogaAnimation({bool forPractice = false}) {
     final model = _model;
     final viewer = _threeJs;
     if (model == null || viewer == null) {
@@ -556,14 +644,62 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     final action = _mixer!.clipAction(_demoClip!)
       ?..reset()
       ..play();
-    action?.loop = three.LoopRepeat;
+
+    if (forPractice) {
+      // For practice mode: play once, record poses, then switch to ready state
+      action?.loop = three.LoopOnce;
+      if (mounted) {
+        setState(() {
+          _practiceState = PracticeState.watching;
+        });
+      }
+      _referenceRecorder.startRecording(fps: 30.0);
+      _recordDemoAnimation();
+    } else {
+      action?.loop = three.LoopRepeat;
+    }
     action?.timeScale = 1.0;
 
     debugPrint(
         '[Demo] Playing yoga demo clip; mixer time=${_mixer!.time.toStringAsFixed(3)}');
   }
 
-  Future<void> _startVideoPose(File videoFile) async {
+  void _recordDemoAnimation() {
+    // Record demo animation frames
+    // Since demo is a keyframe animation, we'll sample it
+    int frameCount = 0;
+    const maxFrames = 120; // 4 seconds at 30fps
+    const frameInterval = Duration(milliseconds: 33); // ~30fps
+
+    Timer.periodic(frameInterval, (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (frameCount >= maxFrames || _practiceState != PracticeState.watching) {
+        timer.cancel();
+        _referenceRecorder.stopRecording();
+        if (mounted && _practiceState == PracticeState.watching) {
+          setState(() {
+            _practiceState = PracticeState.ready;
+          });
+        }
+        return;
+      }
+
+      // Extract current pose from model
+      final retargeter = _retargeter;
+      if (retargeter != null && _model != null) {
+        // Get current bone rotations and create a FramePose
+        // This is simplified - in practice, you'd extract from the animation
+        // For now, we'll use a placeholder that will be replaced when video is used
+        frameCount++;
+      }
+    });
+  }
+
+  Future<void> _startVideoPose(File videoFile,
+      {bool forPractice = false}) async {
     _stopLivePose();
     if (_model == null) {
       debugPrint('[PosePlayback] Model not ready.');
@@ -577,10 +713,21 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     _mixer?.stopAllAction();
     debugPrint('[PosePlayback] Uploading video for pose extraction...');
 
+    if (forPractice && mounted) {
+      setState(() {
+        _practiceState = PracticeState.watching;
+      });
+    }
+
     // Reset progress
     _processingProgressNotifier.value = 0.0;
 
     try {
+      debugPrint('[PosePlayback] Starting video upload to backend');
+      debugPrint('[PosePlayback] Video file: ${videoFile.path}');
+      debugPrint('[PosePlayback] File exists: ${await videoFile.exists()}');
+      debugPrint('[PosePlayback] File size: ${await videoFile.length()} bytes');
+
       // Use SSE endpoint với progress updates
       final result = await _poseApi.uploadVideoForPoseWithProgress(
         videoFile: videoFile,
@@ -593,18 +740,87 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         },
       );
 
+      debugPrint(
+          '[PosePlayback] Received result with ${result.frames.length} frames');
+
       // Reset progress when complete
       _processingProgressNotifier.value = null;
+
+      if (!mounted) return;
 
       if (result.frames.isEmpty) {
         debugPrint('[PosePlayback] No frames returned from backend.');
         _isPosePlaying = false;
+        if (forPractice && mounted) {
+          setState(() {
+            _practiceState = PracticeState.idle;
+          });
+        }
         return;
       }
+
+      // If for practice, play the reference once, and record the same frames as reference.
+      if (forPractice) {
+        // Save for download/debug
+        if (mounted) {
+          setState(() {
+            _lastPoseResult = result;
+          });
+        }
+
+        _poseFrames = result.frames;
+        _poseFrameIndex = 0;
+
+        _referenceRecorder.clear();
+        _referenceRecorder.startRecording(
+            fps: result.fps > 0 ? result.fps : 30.0);
+
+        final fps = result.fps > 0 ? result.fps : 30.0;
+        final stepMs = math.max(8, (1000 / fps).round());
+
+        debugPrint(
+            '[Practice] Playing reference video once: ${_poseFrames.length} frames at ~$fps fps (step ${stepMs}ms)');
+
+        _poseTimer?.cancel();
+        _isPosePlaying = true;
+
+        _poseTimer = Timer.periodic(Duration(milliseconds: stepMs), (timer) {
+          if (!_isPosePlaying || !mounted) {
+            timer.cancel();
+            return;
+          }
+
+          if (_poseFrameIndex >= _poseFrames.length) {
+            debugPrint('[Practice] Completed reference playback.');
+            timer.cancel();
+            _isPosePlaying = false;
+
+            _referenceRecorder.stopRecording();
+            if (mounted) {
+              setState(() {
+                _practiceState = PracticeState.ready;
+              });
+            }
+            return;
+          }
+
+          final frame = _poseFrames[_poseFrameIndex];
+          _poseFrameIndex++;
+
+          // Record reference frame and apply it to model
+          _referenceRecorder.recordFrame(frame);
+          _applyPoseFrame(frame, result);
+        });
+
+        return;
+      }
+
       // Store result for download
-      setState(() {
-        _lastPoseResult = result;
-      });
+      if (mounted) {
+        setState(() {
+          _lastPoseResult = result;
+        });
+      }
       _poseFrames = result.frames;
       _poseFrameIndex = 0;
       final fps = result.fps > 0 ? result.fps : 30.0;
@@ -629,15 +845,22 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
         _poseFrameIndex++;
         _applyPoseFrame(frame, result);
       });
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('[PosePlayback] Error: $e');
+      debugPrint('[PosePlayback] Stack trace: $stackTrace');
       _processingProgressNotifier.value = null;
-      setState(() {
-        _isPosePlaying = false;
-      });
       if (mounted) {
+        setState(() {
+          _isPosePlaying = false;
+          if (forPractice) {
+            _practiceState = PracticeState.idle;
+          }
+        });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Video processing failed: $e')),
+          SnackBar(
+            content: Text('Video processing failed: ${e.toString()}'),
+            duration: const Duration(seconds: 5),
+          ),
         );
       }
     }
@@ -702,11 +925,13 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
     _poseFilters.clear();
     await _livePoseSource.stop();
     await _livePoseSource.start();
+    if (!mounted) return;
     setState(() {
       _livePreview = _livePoseSource.preview;
     });
     _livePoseSub?.cancel();
     _livePoseSub = _livePoseSource.frames.listen((frame) {
+      if (!mounted) return;
       _applyLivePoseFrame(frame);
     });
     debugPrint('[LivePose] Started live camera pose stream.');
@@ -737,6 +962,209 @@ class _YogaThreeSceneState extends State<YogaThreeScene> {
       videoWidth: frame.width.toDouble(),
       videoHeight: frame.height.toDouble(),
     );
+  }
+
+  /// Start practice mode with demo animation.
+  void startPracticeWithDemo() {
+    if (_practiceState != PracticeState.idle) {
+      debugPrint('[Practice] Already in practice mode');
+      return;
+    }
+    _playDemoYogaAnimation(forPractice: true);
+  }
+
+  /// Start practice mode with video.
+  Future<void> startPracticeWithVideo(File videoFile) async {
+    if (_practiceState != PracticeState.idle) {
+      debugPrint('[Practice] Already in practice mode');
+      return;
+    }
+    await _startVideoPose(videoFile, forPractice: true);
+  }
+
+  /// Start user practice (begin recording user poses).
+  Future<void> startUserPractice() async {
+    if (_practiceState != PracticeState.ready) {
+      debugPrint(
+          '[Practice] Not ready to practice. Current state: $_practiceState');
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _practiceState = PracticeState.practicing;
+    });
+
+    // Direction B: record user video, then upload to backend for pose extraction.
+    // Show preview immediately, start recording in background to avoid UI freeze.
+    try {
+      await _livePoseSource.start();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _practiceState = PracticeState.idle;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cannot start camera: $e')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _livePreview = _livePoseSource.preview;
+    });
+
+    if (_livePoseSource.canRecordVideo) {
+      () async {
+        try {
+          await _livePoseSource.startVideoRecording();
+          _isUserRecordingVideo = true;
+          debugPrint('[Practice] Started user video recording');
+        } catch (e) {
+          debugPrint('[Practice] startVideoRecording failed: $e');
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Cannot start recording: $e')),
+          );
+        }
+      }();
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content:
+                  Text('This device cannot record video for practice mode.')),
+        );
+      }
+    }
+  }
+
+  /// Finish practice and calculate score.
+  Future<void> finishPractice() async {
+    if (_practiceState != PracticeState.practicing) {
+      debugPrint('[Practice] Not currently practicing');
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _practiceState = PracticeState.analyzing;
+    });
+
+    File? userVideo;
+    if (_livePoseSource.canRecordVideo) {
+      try {
+        userVideo = await _livePoseSource.stopVideoRecording();
+        _isUserRecordingVideo = false;
+      } catch (e) {
+        debugPrint('[Practice] stopVideoRecording failed: $e');
+      }
+    }
+
+    // Turn off camera preview after user finished
+    if (mounted) {
+      setState(() {
+        _livePreview = null;
+      });
+    }
+
+    if (!mounted) return;
+
+    final referencePoses = _referenceRecorder.recordedPoses;
+    if (referencePoses.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _practiceState = PracticeState.idle;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No reference poses recorded. Please try again.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      if (userVideo == null) {
+        if (!mounted) return;
+        setState(() {
+          _practiceState = PracticeState.idle;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('No user video recorded. Please try again.')),
+          );
+        }
+        return;
+      }
+
+      final userResult = await _poseApi.uploadVideoForPoseWithProgress(
+        videoFile: userVideo,
+        stride: 1,
+        onProgress: (p) => _processingProgressNotifier.value = p,
+      );
+      _processingProgressNotifier.value = null;
+
+      if (userResult.frames.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _practiceState = PracticeState.idle;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('No pose frames extracted from user video.')),
+          );
+        }
+        return;
+      }
+
+      final scoreResult = await _poseApi.comparePoses(
+        referenceFrames: referencePoses,
+        userFrames: userResult.frames,
+        referenceFps: _referenceRecorder.fps,
+        userFps: userResult.fps > 0 ? userResult.fps : 30.0,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _practiceState = PracticeState.completed;
+      });
+
+      // Show score dialog
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => ScoreDisplayDialog(scoreResult: scoreResult),
+        );
+      }
+    } catch (e) {
+      debugPrint('[Practice] Error calculating score: $e');
+      if (!mounted) return;
+      setState(() {
+        _practiceState = PracticeState.idle;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to calculate score: $e')),
+        );
+      }
+    }
+  }
+
+  /// Reset practice mode.
+  void resetPractice() {
+    _referenceRecorder.clear();
+    _userRecorder.clear();
+    if (mounted) {
+      setState(() {
+        _practiceState = PracticeState.idle;
+      });
+    }
   }
 
   three.AnimationClip _buildYogaDemoClip() {
@@ -1210,4 +1638,4 @@ const List<String> _canonicalBones = [
 /// - Real device on same network: use your machine's IP like 'http://192.168.1.65:8000'
 /// - Make sure backend is running with: uvicorn main:app --host 0.0.0.0 --port 8000
 const String poseApiBaseUrl =
-    'http://192.168.1.20:8000'; // Change to your actual backend URL
+    'http://192.168.1.66:8000'; // Change to your actual backend URL
